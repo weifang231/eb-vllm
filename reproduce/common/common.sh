@@ -198,12 +198,16 @@ ensure_calibration() {
 
 # 初始化实验环境
 init_experiment_env() {
-    # common.sh is at reproduce/common/common.sh, project root is ..
+    # common.sh is at reproduce/common/common.sh; repo root is ../.. (eb-vllm/).
     local _common_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    local venv_path=${1:-"${_common_dir}/../.venv"}
+    local venv_path=${1:-"${_common_dir}/../../.venv"}
     ulimit -n 65535 2>/dev/null || true
     if [ -f "${venv_path}/bin/activate" ]; then
         source "${venv_path}/bin/activate"
+    elif ! command -v vllm >/dev/null 2>&1; then
+        echo "[WARN] No venv found at ${venv_path}/bin/activate and 'vllm' not in PATH." >&2
+        echo "       Either activate a venv with vllm installed, or symlink it to:" >&2
+        echo "         ln -s /path/to/your/.venv ${_common_dir}/../../.venv" >&2
     fi
 }
 
