@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import atexit
 import itertools
+import os
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Iterable
 from typing import Any
 
@@ -25,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.utils.profiling import cprofile
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     compute_encoder_budget,
@@ -38,6 +41,7 @@ from vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
+from vllm.v1.core.sched.calibration import load_hardware_params
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
@@ -208,7 +212,2018 @@ class Scheduler(SchedulerInterface):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
+        # Scheduler mode: "cp" (default), "eb" (exclusive batching), "auto" (THETA+)
+        # VLLM_PD_SCHEDULER_MODE takes precedence over VLLM_USE_PD_SCHEDULER
+        _mode_env = os.environ.get("VLLM_PD_SCHEDULER_MODE", "")
+        if _mode_env:
+            self.scheduler_mode = _mode_env.lower()
+        elif os.environ.get("VLLM_USE_PD_SCHEDULER", "0") == "1":
+            self.scheduler_mode = "eb"
+        else:
+            self.scheduler_mode = "cp"
+
+        # Backward-compatible flag — True for both "eb" and "auto"
+        # so all existing PD state initialization and guards work unchanged
+        self.use_pd_scheduler = self.scheduler_mode in ("eb", "auto")
+
+        # P/D competition scheduling state - initialize for "eb" and "auto" modes
+        if self.use_pd_scheduler:
+            # N: batch size - number of requests to prefill before starting decode
+            self.pd_batch_size_N = self.max_num_running_reqs
+
+            # k* mode selection:
+            #   - "direct": k* 直接计算 (默认)
+            #               若指定 VLLM_PD_K_STAR，使用固定 k*；否则根据 Proposition 1 计算
+            #   - "ratio":  k* = θ* × N (比例模式)
+            #               若指定 VLLM_PD_K_RATIO，使用固定 θ*；否则动态计算 θ*
+            self.pd_k_mode = os.environ.get("VLLM_PD_K_MODE", "direct")
+            # direct 模式参数: 若指定 VLLM_PD_K_STAR，使用固定 k*
+            _k_star_env = os.environ.get("VLLM_PD_K_STAR", "")
+            self.pd_k_star_user_specified = bool(_k_star_env)
+            self.pd_k_star_fixed = int(_k_star_env) if _k_star_env else 0
+            # ratio 模式参数: 若指定 VLLM_PD_K_RATIO，使用固定 θ*
+            _k_ratio_env = os.environ.get("VLLM_PD_K_RATIO", "")
+            self.pd_k_ratio_user_specified = bool(_k_ratio_env)
+            self.pd_k_ratio = float(_k_ratio_env) if _k_ratio_env else 0.0
+
+            # Hardware timing parameters (Proposition 1):
+            #   Prefill: T_p = α_p + β_p * L (L = input tokens)
+            #   Decode:  T_d = α_d + β_d * k (per decode step with batch size k)
+            # Priority: calibration file > environment variables
+            # NOTE: No defaults - calibration is REQUIRED for accurate scheduling
+            _hw_params = load_hardware_params()
+            if _hw_params is not None:
+                self.pd_alpha_p = _hw_params.alpha_p
+                self.pd_beta_p = _hw_params.beta_p
+                self.pd_alpha_d = _hw_params.alpha_d
+                self.pd_beta_d = _hw_params.beta_d
+                logger.info(f"Loaded hardware params from calibration file: "
+                            f"model={_hw_params.model}, device={_hw_params.device_name}")
+            else:
+                # Check environment variables - no defaults allowed
+                _alpha_p = os.environ.get("VLLM_PD_ALPHA_P")
+                _beta_p = os.environ.get("VLLM_PD_BETA_P")
+                _alpha_d = os.environ.get("VLLM_PD_ALPHA_D")
+                _beta_d = os.environ.get("VLLM_PD_BETA_D")
+
+                if not all([_alpha_p, _beta_p, _alpha_d, _beta_d]):
+                    raise ValueError(
+                        "PD Scheduler requires hardware calibration parameters. "
+                        "Please run calibration first:\n"
+                        "  python -m vllm.v1.core.sched.calibration --model <model_name>\n"
+                        "Or set environment variable:\n"
+                        "  export VLLM_PD_CALIBRATION_FILE=/path/to/pd_calibration.json\n"
+                        "Or set all timing parameters manually:\n"
+                        "  export VLLM_PD_ALPHA_P=<value>\n"
+                        "  export VLLM_PD_BETA_P=<value>\n"
+                        "  export VLLM_PD_ALPHA_D=<value>\n"
+                        "  export VLLM_PD_BETA_D=<value>"
+                    )
+                self.pd_alpha_p = float(_alpha_p)
+                self.pd_beta_p = float(_beta_p)
+                self.pd_alpha_d = float(_alpha_d)
+                self.pd_beta_d = float(_beta_d)
+
+            # Workload parameter p: cold-start value assuming mean output length ~100
+            # Will be replaced by actual measurement after first N requests complete
+            self.pd_p = 0.01
+
+            # IFR (Increasing Failure Rate) mode parameters
+            # Used for online adaptive threshold selection (Algorithm 2)
+            # Must be initialized before k* mode selection below.
+            # CFR (Constant Failure Rate) mode shares the same online
+            # estimator state but pins η ≡ 0 and uses the exact-θ formula
+            # together with the midpoint construction (Algorithm 1 in the
+            # paper, alg:midpoint).
+            if self.pd_k_mode in ("ifr", "cfr"):
+                # Sliding window of output length samples for hazard
+                # rate estimation.  Keeps only the most recent W samples
+                # so the estimator adapts to distribution shifts within
+                # O(W) completions.
+                self.pd_ifr_window_size = int(os.environ.get(
+                    "VLLM_PD_IFR_WINDOW_SIZE", "500"))
+                self.pd_ifr_samples: deque[int] = deque(
+                    maxlen=self.pd_ifr_window_size)
+                # M: Update interval (re-estimate every M completions)
+                self.pd_ifr_update_interval = int(os.environ.get(
+                    "VLLM_PD_IFR_UPDATE_INTERVAL", "100"))
+                # W_min: Minimum samples before estimation starts
+                self.pd_ifr_min_samples = int(os.environ.get(
+                    "VLLM_PD_IFR_MIN_SAMPLES", "30"))
+                # θ_default: Default theta during cold-start phase
+                self.pd_ifr_default_theta = float(os.environ.get(
+                    "VLLM_PD_IFR_DEFAULT_THETA", "0.70"))
+                # c: Independent update counter
+                self.pd_ifr_update_counter = 0
+                # Estimated hazard rate parameters: h(t) = p_0 + η * t
+                self.pd_hazard_p0 = 0.01  # Base hazard rate (will be estimated)
+                self.pd_hazard_eta = 0.0  # Hazard rate slope (η >= 0 for IFR)
+                # Maximum theta to prevent excessive waiting
+                self.pd_theta_max = float(os.environ.get(
+                    "VLLM_PD_THETA_MAX", "0.80"))
+                # EMA smoothing for θ* to damp oscillations from noisy
+                # hazard-rate estimates.  α=0.3 means ~70% weight on
+                # previous θ*, providing stability while still tracking
+                # distribution shifts.
+                self.pd_ifr_theta_ema_alpha = float(os.environ.get(
+                    "VLLM_PD_IFR_THETA_EMA_ALPHA", "0.3"))
+                self.pd_ifr_theta_initialized = False
+
+            # Initialize k* based on mode
+            if self.pd_k_mode == "direct":
+                # 若指定了 k*，使用固定值；否则计算最优 k*
+                if self.pd_k_star_user_specified:
+                    self.pd_switch_threshold_k = max(1, self.pd_k_star_fixed)
+                else:
+                    self.pd_switch_threshold_k = self._compute_optimal_k()
+            elif self.pd_k_mode == "ratio":
+                # 若未指定 ratio，使用渐近公式计算初始 θ*
+                if not self.pd_k_ratio_user_specified:
+                    self.pd_k_ratio = self._compute_optimal_ratio()
+                self.pd_switch_threshold_k = self._compute_k_from_ratio()
+            elif self.pd_k_mode == "ifr":
+                # IFR mode: use default theta during cold-start phase
+                # Will adapt based on hazard rate estimation as samples accumulate
+                self.pd_k_ratio = self.pd_ifr_default_theta
+                self.pd_switch_threshold_k = self._compute_k_from_ratio()
+            elif self.pd_k_mode == "cfr":
+                # CFR mode (Algorithm 1 / alg:midpoint).
+                #
+                # Cold start: use IFR's default θ until enough samples accumulate
+                # to estimate p_0.  Once p_0 is estimated each update period,
+                # we recompute (θ_0, k̂, N̂) from the exact-θ formula
+                # (Eq. theta_base) and the midpoint construction
+                # (Eq. midpoint_k); η is forced to 0 (CFR assumption).
+                self.pd_k_ratio = self.pd_ifr_default_theta
+                self.pd_switch_threshold_k = self._compute_k_from_ratio()
+                self.pd_cfr_initialized = False
+                # CFR-extra state: μ_O estimator (EMA of avg_output_tokens
+                # already exists as pd_avg_output_tokens; mu_L tracking is
+                # added below for both auto-mode and stats reporting).
+            else:
+                logger.warning(f"Unknown k mode '{self.pd_k_mode}', using direct mode")
+                self.pd_k_mode = "direct"
+                self.pd_switch_threshold_k = self._compute_optimal_k()
+
+            # Log PD scheduler configuration
+            if self.pd_k_mode == "direct":
+                dyn_tag = "fixed" if self.pd_k_star_user_specified else "auto"
+                k_info = f"k*={self.pd_switch_threshold_k} ({dyn_tag})"
+            elif self.pd_k_mode == "ratio":
+                dyn_tag = "fixed" if self.pd_k_ratio_user_specified else "auto"
+                k_info = f"θ*={self.pd_k_ratio:.4f}, k*={self.pd_switch_threshold_k} ({dyn_tag})"
+            elif self.pd_k_mode == "cfr":
+                k_info = (f"θ*={self.pd_k_ratio:.4f}, k*={self.pd_switch_threshold_k} "
+                          f"(CFR midpoint, θ_max={self.pd_theta_max})")
+            else:  # ifr
+                k_info = (f"θ*={self.pd_k_ratio:.4f}, k*={self.pd_switch_threshold_k} "
+                          f"(IFR adaptive, θ_max={self.pd_theta_max})")
+            logger.info(
+                f"[P/D Competition Scheduler] Initialized: "
+                f"N={self.pd_batch_size_N}, k_mode={k_info}, "
+                f"α_p={self.pd_alpha_p}, β_p={self.pd_beta_p}, "
+                f"α_d={self.pd_alpha_d}, β_d={self.pd_beta_d}"
+            )
+
+            # Phase tracking:
+            # Phase 0: Initial prefill - prefill N requests
+            # Phase 1: Decode - switch when min(q,N-n)/n >= θ*/(1-θ*)
+            # Phase 2: Refill prefill - prefill min(q,N-n) requests (no decode)
+            # Then back to Phase 1
+            self.pd_phase = 0
+
+            # Counters
+            self.pd_prefilled_count = 0  # Prefills completed in current batch
+            self.pd_completed_decode_count = 0  # Decodes completed since last switch
+            self.pd_refill_target = 0  # Number of requests to prefill in Phase 2
+
+            # Track which requests are in decode phase
+            self.pd_decoding_requests: set[str] = set()
+
+            # Unified parameter update interval for p, avg_output_tokens, k*, θ*
+            # All parameters update together every pd_param_update_interval requests
+            self.pd_param_update_interval = int(os.environ.get(
+                "VLLM_PD_PARAM_UPDATE_INTERVAL", "100"))
+            self.pd_ema_alpha = 0.2  # EMA smoothing factor
+            self.pd_total_completed = 0  # Total completed requests (all time)
+            self.pd_param_initialized = False  # First batch: direct assign, not EMA
+            # Batch accumulators (reset after each parameter update)
+            self.pd_batch_completed_count = 0  # Completed in current batch
+            self.pd_batch_total_output_tokens = 0  # Sum of output tokens in batch
+
+            # Track average output tokens with EMA for adaptive thresholds
+            self.pd_avg_output_tokens = 100.0  # Initial estimate (cold start)
+            # Base reserve ratio (minimum fraction of KV cache to reserve for decode)
+            self.pd_base_kv_reserve = float(os.environ.get(
+                "VLLM_PD_BASE_KV_RESERVE", "0"))
+            # Safety margin multiplier for output token estimation
+            self.pd_output_margin = float(os.environ.get(
+                "VLLM_PD_OUTPUT_MARGIN", "0.5"))
+
+            # N RECOVERY cooldown to prevent frequent updates
+            self.pd_last_n_update_time = 0.0  # timestamp of last N update
+            self.pd_n_update_cooldown = float(os.environ.get(
+                "VLLM_PD_N_UPDATE_COOLDOWN", "2.0"))  # seconds
+
+            # μ_L (mean prompt length) EMA — used by both CFR midpoint
+            # construction and the adaptive selector diagnostic Δ(N).
+            self.pd_avg_prompt_len = 512.0
+            self.pd_avg_prompt_ema_alpha = 0.05  # slow EMA
+
+            # CFR / midpoint configuration
+            # Dynamic memory-safe N̂ (Eq. eq:Nstar / Proposition prop:memory):
+            # if enabled, the scheduler periodically re-derives the maximum
+            # batch size from the KV-cache budget and the OOM tolerance ε.
+            self.pd_auto_compute_n = (os.environ.get(
+                "VLLM_PD_AUTO_COMPUTE_N", "0") == "1")
+            self.pd_oom_tolerance = float(os.environ.get(
+                "VLLM_PD_OOM_TOLERANCE", "0.01"))
+            # Cumulative count of requests that ran out of KV memory and had
+            # to be preempted — surfaced in stats for OOM-rate validation.
+            self.pd_oom_event_count = 0
+            # Per-update snapshot history for CFR validation experiments.
+            self.pd_cfr_update_history: list[dict] = []
+            # Last computed midpoint diagnostics (logged into stats).
+            self.pd_theta_zero_last = 0.0
+            self.pd_k_hat_midpoint_last = 0.0
+            self.pd_n_hat_safe_last = 0.0
+            self.pd_delta_diagnostic_last = 0.0
+
+            # Log adaptive settings
+            logger.info(
+                f"[P/D Adaptive] Initial: avg_output={self.pd_avg_output_tokens:.0f}, "
+                f"base_kv_reserve={self.pd_base_kv_reserve:.2f}, "
+                f"output_margin={self.pd_output_margin:.1f}, "
+                f"auto_compute_N={self.pd_auto_compute_n}, "
+                f"OOM_tol_eps={self.pd_oom_tolerance}"
+            )
+        else:
+            logger.info("[Scheduler] Using original vLLM scheduler")
+
+        # --- THETA+ auto mode state ---
+        if self.scheduler_mode == "auto":
+            # Current active scheduler: "cp" or "eb"
+            self._active_scheduler = os.environ.get(
+                "VLLM_PD_AUTO_COLD_START_MODE", "cp")
+
+            # CP effective marginal cost: f(r) = a + b*r + c*r² (offline profiled)
+            self._cp_cost_a = float(os.environ.get("VLLM_PD_CP_COST_A", "0"))
+            self._cp_cost_b = float(os.environ.get("VLLM_PD_CP_COST_B", "0"))
+            self._cp_cost_c = float(os.environ.get("VLLM_PD_CP_COST_C", "0"))
+            self._cp_cost_profiled = any(
+                os.environ.get(k)
+                for k in ["VLLM_PD_CP_COST_A", "VLLM_PD_CP_COST_B",
+                           "VLLM_PD_CP_COST_C"])
+
+            # α_CP: defaults to α_p (paper approximation α_p ≈ α_d ≈ α_CP)
+            _acp = os.environ.get("VLLM_PD_ALPHA_CP", "")
+            self._alpha_cp = float(_acp) if _acp else self.pd_alpha_p
+
+            # Hysteresis band and cooldown for mode switching
+            self._mode_switch_delta = float(os.environ.get(
+                "VLLM_PD_MODE_SWITCH_DELTA", "0.0001"))
+            self._mode_cooldown_max = int(os.environ.get(
+                "VLLM_PD_MODE_COOLDOWN", "3"))
+            self._mode_cooldown = 0
+
+            # Batch occupancy EMA (N_obs) — uses asymmetric EMA in schedule()
+            self._n_obs = float(self.max_num_running_reqs)
+
+            # Average prompt length EMA (μ_L tracking)
+            self._avg_prompt_len = 512.0  # initial estimate
+            self._avg_prompt_ema_alpha = 0.05  # slow EMA for prompt length
+
+            # Mode switch tracking for stats/debugging
+            self._mode_switch_history: list[dict] = []
+            self._mode_switch_count = 0
+
+            logger.info(
+                f"[THETA+] Auto mode initialized: "
+                f"cold_start={self._active_scheduler}, "
+                f"cp_cost_profiled={self._cp_cost_profiled}, "
+                f"alpha_cp={self._alpha_cp:.6f}, "
+                f"delta={self._mode_switch_delta}, "
+                f"cooldown={self._mode_cooldown_max}"
+            )
+
+        self.chunk_prefilling: list[Request] = []
+
+        # N update history: (timestamp, old_N, new_N, reason)
+        self.pd_n_update_history: list[dict] = []
+        self._pd_start_time = time.monotonic()
+
+        # Performance metrics for parameter updates
+        self._param_update_count = 0          # Number of cold path updates
+        self._param_update_total_us = 0.0     # Total time spent in cold path (μs)
+        self._last_param_update_us = 0.0      # Last cold path duration (μs)
+
+        # Schedule statistics collection for analysis
+        self._schedule_stats_enabled = os.environ.get(
+            "VLLM_COLLECT_SCHEDULE_STATS", "0") == "1"
+        self._schedule_stats: list[dict] = []
+        self._schedule_stats_start_time: float | None = None  # Set on first record
+        self._schedule_stats_file = os.environ.get(
+            "VLLM_SCHEDULE_STATS_FILE", "schedule_stats.json")
+
+        # Register atexit handler to save stats on shutdown
+        if self._schedule_stats_enabled:
+            atexit.register(self._save_stats_on_exit)
+
+    # Phase name constants for logging
+    PD_PHASE_NAMES = {0: "INITIAL_PREFILL", 1: "DECODE", 2: "REFILL_PREFILL"}
+
+    def get_pd_stats(self) -> dict:
+        """Get current P/D scheduling statistics for monitoring."""
+        stats = {
+            "phase": self.pd_phase,
+            "k_star": self.pd_switch_threshold_k,
+            "k_ratio": self.pd_k_ratio,
+            "k_ratio_user_specified": self.pd_k_ratio_user_specified,
+            "k_mode": self.pd_k_mode,
+            "N": self.pd_batch_size_N,
+            "prefilled_count": self.pd_prefilled_count,
+            "completed_decode_count": self.pd_completed_decode_count,
+            "refill_target": self.pd_refill_target,
+            "decoding_requests": len(self.pd_decoding_requests),
+            "running_requests": len(self.running),
+            "waiting_requests": len(self.waiting),
+            "p": self.pd_p,
+            "total_completed": self.pd_total_completed,
+            "avg_output_tokens": self.pd_avg_output_tokens,
+            "adaptive_kv_threshold": self._compute_adaptive_kv_threshold(),
+            "adaptive_N": self._compute_adaptive_N(),
+        }
+        # Add IFR-specific stats if in IFR mode
+        if self.pd_k_mode == "ifr":
+            stats.update({
+                "hazard_p0": self.pd_hazard_p0,
+                "hazard_eta": self.pd_hazard_eta,
+                "ifr_sample_count": len(self.pd_ifr_samples),
+                "ifr_update_counter": self.pd_ifr_update_counter,
+                "ifr_update_interval": self.pd_ifr_update_interval,
+                "ifr_window_size": self.pd_ifr_window_size,
+                "theta_max": self.pd_theta_max,
+            })
+        return stats
+
+    # @cprofile("compute_optimal_k.prof")
+    def _compute_optimal_k(self) -> int:
+        """
+        Compute optimal switching threshold k* using Proposition 1.
+
+        k* is the smallest integer k satisfying:
+            k * τ(N-k) - Σ_{j=N-k+1}^{N} τ(j) >= α_p
+
+        This maximizes throughput = k / (E[T_d(k)] + E[T_p(k)])
+
+        Optimized: O(N) instead of O(N²) via τ precomputation + incremental sum.
+        """
+        N = self.pd_batch_size_N
+
+        # Precompute all τ values: τ[0], τ[1], ..., τ[N]
+        # τ(j) = (α_d + β_d * j) / (1 - (1-p)^j), τ[0] = inf
+        one_minus_p = 1.0 - self.pd_p
+        tau = []
+        power = 1.0  # (1-p)^j, updated incrementally
+        for j in range(N + 1):
+            if j == 0:
+                tau.append(float('inf'))
+            else:
+                power *= one_minus_p  # power = (1-p)^j
+                denom = 1.0 - power
+                if denom <= 0:
+                    tau.append(float('inf'))
+                else:
+                    tau.append((self.pd_alpha_d + self.pd_beta_d * j) / denom)
+
+        # Search with incremental sum: sum_tau accumulates τ[N-k+1] to τ[N]
+        sum_tau = 0.0
+        for k in range(1, N + 1):
+            # Incrementally add τ[N-k+1] to sum
+            sum_tau += tau[N - k + 1]
+
+            # LHS: k * τ[N-k]
+            lhs = k * tau[N - k]
+
+            # RHS: Σ τ[j] + α_p
+            rhs = sum_tau + self.pd_alpha_p
+
+            if lhs >= rhs:
+                return max(1, k)
+
+        # If no k satisfies the condition, use N/5 as fallback
+        return max(1, N // 5)
+
+    def _compute_k_from_ratio(self) -> int:
+        """
+        Compute k* as a ratio of N.
+
+        k* = pd_k_ratio * N
+
+        This makes k* automatically adapt when N changes (e.g., due to
+        adaptive N learning based on avg output tokens).
+
+        Returns:
+            int: k* value (at least 1)
+        """
+        k = int(self.pd_k_ratio * self.pd_batch_size_N)
+        return max(1, k)
+
+    def _compute_optimal_ratio(self) -> float:
+        """
+        Compute optimal ratio θ* using asymptotic formula (Proposition 1).
+
+        For long sequences (p << 1) and moderate batch sizes (N << 1/p),
+        the normalized threshold θ* = k*/N satisfies:
+
+            θ/(1-θ) + ln(1-θ) = p * α_p / α_d
+
+        This is solved using bisection method.
+
+        Returns:
+            float: optimal ratio θ* in (0, 1)
+        """
+        import math
+
+        # Compute RHS: C = p * α_p / α_d
+        C = self.pd_p * self.pd_alpha_p / self.pd_alpha_d
+
+        # f(θ) = θ/(1-θ) + ln(1-θ)
+        # We need to solve f(θ) = C
+        def f(theta: float) -> float:
+            if theta <= 0 or theta >= 1:
+                return float('inf')
+            return theta / (1 - theta) + math.log(1 - theta)
+
+        # f(θ) is monotonically increasing from f(0+) = 0 to f(1-) = +∞
+        # Use bisection to find θ such that f(θ) = C
+
+        # Edge case: if C is very small, θ* ≈ 0
+        if C <= 1e-6:
+            return 0.01  # 使用 1% 作为最小值
+
+        # Bisection search
+        lo, hi = 0.001, 0.999
+        for _ in range(100):  # 足够的迭代次数保证精度
+            mid = (lo + hi) / 2
+            f_mid = f(mid)
+            if abs(f_mid - C) < 1e-9:
+                break
+            if f_mid < C:
+                lo = mid
+            else:
+                hi = mid
+
+        theta_star = (lo + hi) / 2
+
+        # Clamp to reasonable range [0.01, 0.99]
+        theta_star = max(0.01, min(0.99, theta_star))
+
+        logger.debug(f"Computed optimal ratio: θ*={theta_star:.4f} "
+                     f"(p={self.pd_p}, α_p={self.pd_alpha_p}, α_d={self.pd_alpha_d}, C={C:.6f})")
+
+        return theta_star
+
+    # ================================================================
+    # CFR midpoint algorithm (Algorithm alg:midpoint)
+    # ----------------------------------------------------------------
+    # The four functions below implement the closed-form midpoint
+    # construction.  They are independent of the existing IFR / ratio
+    # code path so the legacy schedulers remain bit-for-bit reproducible.
+    # ================================================================
+
+    def _compute_theta_zero_exact(self, p_0: float) -> float:
+        """θ_0 from the exact CFR formula (Eq. theta_base):
+
+            θ/(1-θ) + ln(1-θ) = (-ln(1-p_0)) · α_p / α_d.
+
+        Differs from `_compute_optimal_ratio` (which uses p_0 directly on the
+        right-hand side, valid only as p_0 → 0) by the exact -ln(1-p_0)
+        factor required by the paper's CFR proofs.
+        """
+        import math
+
+        if p_0 <= 0.0:
+            return 0.01
+        if p_0 >= 1.0 - 1e-9:
+            return 0.99
+
+        rhs = (-math.log(1.0 - p_0)) * self.pd_alpha_p / self.pd_alpha_d
+        if rhs <= 1e-12:
+            return 0.01
+
+        def f(theta: float) -> float:
+            if theta <= 0.0 or theta >= 1.0:
+                return float("inf")
+            return theta / (1.0 - theta) + math.log(1.0 - theta)
+
+        lo, hi = 1e-6, 1.0 - 1e-6
+        for _ in range(80):
+            mid = 0.5 * (lo + hi)
+            if f(mid) < rhs:
+                lo = mid
+            else:
+                hi = mid
+        theta_zero = 0.5 * (lo + hi)
+        return max(0.01, min(0.99, theta_zero))
+
+    def _compute_midpoint_k(
+        self, theta_zero: float, p_0: float, n: int, mu_L: float
+    ) -> tuple[float, int, int, int]:
+        """Midpoint k̂ following Eqs. eq:Rbar / eq:TP_int / eq:midpoint_k.
+
+        Returns
+        -------
+        (k_hat, M_minus, M_plus, M_star) where k_hat is the (real-valued)
+        midpoint placement; the integer threshold actually used is
+        max(1, round(k_hat)).
+        """
+        import math
+
+        if p_0 <= 0.0 or p_0 >= 1.0 or theta_zero <= 0.0 or theta_zero >= 1.0:
+            # Fall back to floor(θ_0 N).
+            return float(max(1, int(theta_zero * n))), 0, 0, 0
+        if n <= 1:
+            return 1.0, 0, 0, 0
+
+        # τ_R* = ln(1-θ_0) / ln(1-p_0)
+        log_one_minus_theta = math.log(1.0 - theta_zero)
+        log_one_minus_p = math.log(1.0 - p_0)
+        if log_one_minus_p == 0.0:
+            return float(max(1, int(theta_zero * n))), 0, 0, 0
+        tau_real = log_one_minus_theta / log_one_minus_p
+        m_minus = max(1, int(math.floor(tau_real)))
+        m_plus = max(m_minus + 1, int(math.ceil(tau_real)))
+
+        def r_bar(m: int) -> float:
+            if m <= 0:
+                return 0.0
+            return n * (1.0 - (1.0 - p_0) ** m)
+
+        def tp_int(m: int) -> float:
+            r = r_bar(m)
+            denom = (
+                self.pd_alpha_d * m
+                + self.pd_beta_d * r / max(p_0, 1e-9)
+                + self.pd_alpha_p
+                + self.pd_beta_p * r * mu_L
+            )
+            return r / denom if denom > 0 else 0.0
+
+        m_star = m_minus if tp_int(m_minus) >= tp_int(m_plus) else m_plus
+        # k̂ = ½ (R̄(M*-1) + R̄(M*))
+        k_hat = 0.5 * (r_bar(max(0, m_star - 1)) + r_bar(m_star))
+        # Guard rails: keep within [1, N-1].
+        k_hat = max(1.0, min(float(n - 1), k_hat))
+        return k_hat, m_minus, m_plus, m_star
+
+    def _compute_memory_safe_n(
+        self, theta_zero: float, p_0: float, mu_L: float
+    ) -> int:
+        """Memory-safe N̂ from Proposition prop:memory.
+
+        NOTE on paper-vs-code:
+        The main paper (Eq. eq:Nstar) presents the supremum bound
+            x_ε = ν · ln(1/ε),    ν = 1/(p_0² · μ_L)
+        giving the linearised closed form
+            N* = ⌊ (C - ν · ln(1/ε)) / D(θ) ⌋.
+        This implementation instead solves the CLT-type concentration
+            N · D(θ) + σ(θ) · sqrt(N · ln(1/ε)) ≤ C
+        for N (returning the floor of the positive root, clamped to
+        [1, max_num_running_reqs]). The two bounds are asymptotically
+        equivalent for N ≫ 1; the CLT form is tighter in the moderate-N
+        regime relevant to our experiments, and is the form actually used
+        to produce all paper results. The journal version of the paper
+        adopts this quadratic form.
+
+        Here:
+            D(θ) = μ_L + (1-θ)/(θ p_0) · Λ        with Λ = -ln(1-θ)
+            σ²(θ) = 2Λ (1 + (p_0 μ_L + Λ/θ)²) / p_0²
+        and ε = `pd_oom_tolerance`.
+        """
+        import math
+
+        n_cap = int(self.max_num_running_reqs)
+        if not self.pd_auto_compute_n:
+            # Auto-compute disabled — keep current N (typically the user's
+            # --max-num-seqs).
+            return n_cap
+
+        # Capacity C: total KV-cache token slots advertised by the kv-cache
+        # manager (in tokens, i.e. block_size × num_blocks).
+        try:
+            num_blocks = int(self.kv_cache_manager.block_pool.num_gpu_blocks)
+            block_size = int(self.block_size)
+            capacity_tokens = num_blocks * block_size
+        except Exception:
+            return n_cap
+        if capacity_tokens <= 0:
+            return n_cap
+
+        eps = max(min(self.pd_oom_tolerance, 0.5), 1e-6)
+        log_inv_eps = math.log(1.0 / eps)
+        if theta_zero <= 0.0 or theta_zero >= 1.0 or p_0 <= 0.0:
+            return n_cap
+
+        # D(θ) = μ_L + (1-θ)/(θ p_0) ln(1/(1-θ))
+        # D_max(θ) ≈ D(θ) when p_0 D(θ) ≥ 1 (paper assumption — true for
+        # all real workloads in the paper's experiments).  We use D(θ) as
+        # D_max(θ) for the closed-form bound.
+        Lambda = -math.log(1.0 - theta_zero)
+        D_theta = mu_L + (1.0 - theta_zero) / (theta_zero * p_0) * Lambda
+        if D_theta <= 0:
+            return n_cap
+
+        # σ²(θ) = 2 Λ (1 + (p_0 μ_L + λ_θ)²) / p_0², λ_θ = Λ/θ
+        lambda_theta = Lambda / max(theta_zero, 1e-9)
+        sigma_sq = (2.0 * Lambda * (1.0 + (p_0 * mu_L + lambda_theta) ** 2)
+                    / max(p_0 ** 2, 1e-18))
+        sigma = math.sqrt(max(sigma_sq, 0.0))
+
+        # Solve N · D + σ √(N · log(1/ε)) ≤ C  →
+        #   √N = ( -σ√L + √(σ² L + 4 D C) ) / (2 D)
+        sqrt_N = (-sigma * math.sqrt(log_inv_eps)
+                  + math.sqrt(sigma_sq * log_inv_eps + 4.0 * D_theta * capacity_tokens)
+                  ) / (2.0 * D_theta)
+        n_safe = int(math.floor(max(0.0, sqrt_N) ** 2))
+        return max(1, min(n_cap, n_safe))
+
+    def _compute_diagnostic_delta(
+        self,
+        theta_zero: float,
+        k_hat: float,
+        n: int,
+        mu_L: float,
+        mu_O: float,
+    ) -> float:
+        """Diagnostic Δ(N) (Eq. eq:diagnostic) for the adaptive selector.
+
+        Δ(N) = (β_MB^e − β_EB^w)
+             − (1/(μ_L+μ_O)) · [ (α_p − α_d ln(1−θ_0) μ_O)/k̂
+                               − α_MB(1+μ_O)/N ]
+
+        The kernel-cost terms (β_MB^e, α_MB) are read from environment-
+        provided calibration constants (VLLM_PD_BETA_MB_E, VLLM_PD_ALPHA_MB)
+        — defaulting to 0 when not profiled (in which case Δ degenerates
+        but the sign of the second term still drives MB/EB choice).
+        """
+        import math
+
+        if mu_L + mu_O <= 0 or k_hat <= 0 or n <= 0:
+            return 0.0
+
+        beta_eb_w = ((self.pd_beta_p * mu_L + self.pd_beta_d * mu_O)
+                     / (mu_L + mu_O))
+        beta_mb_e = float(os.environ.get("VLLM_PD_BETA_MB_E", str(beta_eb_w)))
+        alpha_mb = float(os.environ.get("VLLM_PD_ALPHA_MB",
+                                          str(self.pd_alpha_p)))
+
+        log_one_minus_theta = math.log(max(1.0 - theta_zero, 1e-9))
+        eb_term = (self.pd_alpha_p
+                   - self.pd_alpha_d * log_one_minus_theta * mu_O) / k_hat
+        mb_term = alpha_mb * (1.0 + mu_O) / n
+
+        return (beta_mb_e - beta_eb_w) - (eb_term - mb_term) / (mu_L + mu_O)
+
+    def _estimate_hazard_params(self) -> tuple[float, float]:
+        """
+        Estimate hazard rate parameters (p_0, η) from sliding window samples.
+
+        The empirical hazard rate at iteration t is:
+            ĥ(t) = #{O_i = t} / #{O_i >= t}
+
+        We fit h(t) = p_0 + η * t via weighted least squares over
+        t ∈ [t_start, t_95], where t_start is the 5th percentile of
+        observed output lengths.  Fitting only over the support of the
+        distribution avoids the zero-hazard prefix that arises with
+        bounded-support distributions (e.g. uniform, gamma with large
+        shape), which would otherwise drag p_0 negative.
+
+        Returns:
+            tuple[float, float]: (p_0, η) where η >= 0 for IFR distributions
+        """
+        # Use sliding window samples for estimation
+        samples = self.pd_ifr_samples
+        if len(samples) < self.pd_ifr_min_samples:
+            # Not enough samples, return current estimates
+            return self.pd_hazard_p0, self.pd_hazard_eta
+
+        # Compute fitting range: [t_start, t_95]
+        # t_start = 5th percentile — skips the zero-hazard region before
+        # the distribution's effective support begins.
+        # t_95 = 95th percentile — avoids noisy tail estimates.
+        sorted_samples = sorted(samples)
+        t_start = sorted_samples[max(0, int(len(sorted_samples) * 0.05))]
+        t_start = max(t_start, 1)
+        t_95 = sorted_samples[int(len(sorted_samples) * 0.95)]
+        t_95 = max(t_95, t_start + 10)  # Ensure enough range
+
+        # Count occurrences and survivors
+        from collections import Counter
+        counts = Counter(samples)
+        max_t = max(samples)
+
+        # Compute survivors: #{O_i >= t} for each t
+        survivors = [0] * (max_t + 2)
+        survivors[max_t + 1] = 0
+        for t in range(max_t, 0, -1):
+            survivors[t] = survivors[t + 1] + counts.get(t, 0)
+
+        # Compute empirical hazard rate and perform weighted least squares
+        # h(t) = p_0 + η * t
+        # Minimize: Σ w_t * (ĥ(t) - p_0 - η * t)^2
+        sum_w = 0.0
+        sum_wt = 0.0
+        sum_wt2 = 0.0
+        sum_wh = 0.0
+        sum_wth = 0.0
+
+        for t in range(t_start, min(t_95 + 1, max_t + 1)):
+            n_t = survivors[t]
+            if n_t < 5:  # Skip unreliable estimates
+                continue
+            d_t = counts.get(t, 0)
+            h_t = d_t / n_t  # Empirical hazard at t
+
+            w = n_t  # Weight by number of survivors
+            sum_w += w
+            sum_wt += w * t
+            sum_wt2 += w * t * t
+            sum_wh += w * h_t
+            sum_wth += w * t * h_t
+
+        if sum_w < 10:
+            # Not enough valid data points
+            return self.pd_hazard_p0, self.pd_hazard_eta
+
+        # Solve normal equations for weighted least squares
+        # [sum_w    sum_wt ] [p_0]   [sum_wh ]
+        # [sum_wt   sum_wt2] [η  ] = [sum_wth]
+        det = sum_w * sum_wt2 - sum_wt * sum_wt
+        if abs(det) < 1e-10:
+            # Singular matrix, use sample mean based estimate
+            sample_mean = sum(samples) / len(samples)
+            p_0 = 1.0 / sample_mean if sample_mean > 0 else 0.01
+            return p_0, 0.0
+
+        p_0 = (sum_wt2 * sum_wh - sum_wt * sum_wth) / det
+        eta = (sum_w * sum_wth - sum_wt * sum_wh) / det
+
+        # Ensure valid ranges
+        eta = max(0.0, eta)     # η >= 0 for IFR (clamp negative to CFR)
+
+        # Floor p_0 at the mean-based completion rate 1/μ_o.
+        # For strongly IFR distributions (e.g. Gamma shape≥2), the WLS
+        # intercept p_0 is near zero because h(0)≈0.  Using the raw
+        # estimate would make θ_cfr vanishingly small and cause the IFR
+        # correction Δθ ∝ η/p_0² to explode.  The geometric rate 1/μ_o
+        # is a natural lower bound: it is the completion rate of a
+        # memoryless process with the same mean output length.
+        sample_mean = sum(samples) / len(samples)
+        p_0_floor = (1.0 / sample_mean) if sample_mean > 0 else 0.01
+        p_0 = max(p_0, p_0_floor)
+
+        return p_0, eta
+
+    def _compute_ifr_correction(self, theta_cfr: float) -> float:
+        """
+        Compute IFR correction Δθ based on Proposition 3.
+
+        For linear increasing hazard rate h(t) = p_0 + η * t with η > 0,
+        the optimal threshold admits:
+            θ*_IFR = θ*_CFR + Δθ
+
+        where:
+            Δθ = (η(1-θ*_CFR)²) / (p_0² * θ*_CFR) *
+                 [Λ(θ*_CFR/(1-θ*_CFR) - Λ/2) + ρ(Λ - θ*_CFR)]
+
+        with Λ = -ln(1-θ*_CFR) and ρ = β_d * N / α_d.
+
+        Args:
+            theta_cfr: The CFR baseline threshold θ*_CFR
+
+        Returns:
+            float: The correction Δθ (always >= 0)
+        """
+        if self.pd_hazard_eta <= 0 or theta_cfr <= 0 or theta_cfr >= 1:
+            return 0.0
+
+        import math
+
+        p_0 = self.pd_hazard_p0
+        eta = self.pd_hazard_eta
+
+        # Λ = -ln(1 - θ*_CFR)
+        Lambda = -math.log(1 - theta_cfr)
+
+        # ρ = β_d * N / α_d (per-token cost ratio)
+        rho = self.pd_beta_d * self.pd_batch_size_N / self.pd_alpha_d
+
+        # Duration effect: Λ * (θ*_CFR/(1-θ*_CFR) - Λ/2)
+        duration_effect = Lambda * (theta_cfr / (1 - theta_cfr) - Lambda / 2)
+
+        # Per-token cost effect: ρ * (Λ - θ*_CFR)
+        per_token_effect = rho * (Lambda - theta_cfr)
+
+        # Δθ = (η(1-θ*_CFR)²) / (p_0² * θ*_CFR) * [duration + per_token]
+        numerator = eta * (1 - theta_cfr) ** 2
+        denominator = p_0 ** 2 * theta_cfr
+
+        if denominator < 1e-12:
+            return 0.0
+
+        delta_theta = (numerator / denominator) * (duration_effect + per_token_effect)
+
+        # Ensure non-negative (should always be positive for IFR)
+        delta_theta = max(0.0, delta_theta)
+
+        # Cap Δθ at 5·θ_cfr.  The first-order expansion is derived for
+        # small η; when η/p_0² is large the uncapped correction can
+        # exceed 1, making θ* meaningless.  The factor 5 allows the IFR
+        # correction to dominate the CFR base (up to θ* ≤ 6·θ_cfr) while
+        # preventing runaway values.
+        delta_theta = min(delta_theta, 5.0 * theta_cfr)
+
+        return delta_theta
+
+    def _compute_optimal_ratio_ifr(self) -> float:
+        """
+        Compute optimal ratio θ* with IFR correction.
+
+        This implements Algorithm 1 (Adaptive Threshold Selection):
+        1. Estimate hazard rate parameters (p_0, η) from samples
+        2. Compute CFR baseline θ*_CFR using Proposition 1
+        3. If η > 0, apply IFR correction from Proposition 3
+        4. Return θ* = min(θ*_CFR + Δθ, θ_max)
+
+        Returns:
+            float: Optimal ratio θ* in (0, θ_max]
+        """
+        # Step 1: Estimate hazard rate parameters
+        p_0, eta = self._estimate_hazard_params()
+        self.pd_hazard_p0 = p_0
+        self.pd_hazard_eta = eta
+
+        # Step 2: Compute CFR baseline using p_0 (not self.pd_p)
+        # Temporarily set pd_p to p_0 for _compute_optimal_ratio
+        old_p = self.pd_p
+        self.pd_p = p_0
+        theta_cfr = self._compute_optimal_ratio()
+        self.pd_p = old_p
+
+        # Step 3: Apply IFR correction if η > 0
+        if eta > 0:
+            delta_theta = self._compute_ifr_correction(theta_cfr)
+            theta_star = theta_cfr + delta_theta
+        else:
+            theta_star = theta_cfr
+
+        # Step 4: Clamp to θ_max
+        theta_star = min(theta_star, self.pd_theta_max)
+        theta_star = max(0.01, theta_star)
+
+        logger.debug(
+            f"IFR optimal ratio: θ*={theta_star:.4f} "
+            f"(θ*_CFR={theta_cfr:.4f}, Δθ={theta_star - theta_cfr:.4f}, "
+            f"p_0={p_0:.6f}, η={eta:.8f})"
+        )
+
+        return theta_star
+
+    def _update_ifr_threshold(self) -> None:
+        """
+        Online adaptive threshold update (Algorithm 2).
+
+        Called every M completions when window has >= W_min samples.
+        Updates hazard rate parameters and recomputes θ*.
+        EMA smoothing is applied to θ* to damp oscillations caused by
+        noisy hazard-rate estimates.
+        """
+        old_ratio = self.pd_k_ratio
+        old_k = self.pd_switch_threshold_k
+
+        # Step 1: Estimate hazard rate parameters from sliding window
+        p_0, eta = self._estimate_hazard_params()
+        self.pd_hazard_p0 = p_0
+        self.pd_hazard_eta = eta
+
+        # Step 2: Compute CFR baseline θ_0 using p_0
+        old_p = self.pd_p
+        self.pd_p = p_0
+        theta_0 = self._compute_optimal_ratio()
+        self.pd_p = old_p
+
+        # Step 3: Apply IFR correction if η > 0
+        if eta > 0:
+            delta_theta = self._compute_ifr_correction(theta_0)
+            theta_star = theta_0 + delta_theta
+        else:
+            delta_theta = 0.0
+            theta_star = theta_0
+
+        # Step 4: Clamp to [0.01, θ_max]
+        theta_star = max(0.01, min(theta_star, self.pd_theta_max))
+
+        # Step 5: EMA smoothing to damp oscillations from noisy estimates.
+        # During cold start (first update), assign directly.
+        if not self.pd_ifr_theta_initialized:
+            self.pd_k_ratio = theta_star
+            self.pd_ifr_theta_initialized = True
+        else:
+            alpha = self.pd_ifr_theta_ema_alpha
+            self.pd_k_ratio = alpha * theta_star + (1 - alpha) * self.pd_k_ratio
+
+        self.pd_switch_threshold_k = max(
+            1, int(self.pd_k_ratio * self.pd_batch_size_N))
+
+        # Log significant changes
+        if abs(self.pd_k_ratio - old_ratio) > 0.01 or old_k != self.pd_switch_threshold_k:
+            logger.info(
+                f"[P/D IFR] online update: θ*={old_ratio:.4f}->{self.pd_k_ratio:.4f} "
+                f"(θ_CFR={theta_0:.4f}, Δθ={delta_theta:.4f}), "
+                f"k*={old_k}->{self.pd_switch_threshold_k} "
+                f"(p_0={p_0:.6f}, η={eta:.8f}, samples={len(self.pd_ifr_samples)})"
+            )
+
+    def _update_cfr_threshold(self) -> None:
+        """Online CFR midpoint update (Algorithm alg:midpoint).
+
+        Estimates p_0 from the sliding window, recomputes the exact θ_0
+        (Eq. theta_base), the memory-safe N̂ (Eq. eq:Nstar) when enabled,
+        and the midpoint k̂ (Eq. eq:midpoint_k).  Also evaluates the
+        diagnostic Δ(N) used by the adaptive selector.
+        """
+        old_ratio = self.pd_k_ratio
+        old_k = self.pd_switch_threshold_k
+        old_n = self.pd_batch_size_N
+
+        # Step 1: Estimate p_0 (η pinned to 0 in CFR).
+        p_0, _eta = self._estimate_hazard_params()
+        self.pd_hazard_p0 = p_0
+        self.pd_hazard_eta = 0.0  # CFR assumption
+
+        mu_L = max(1.0, float(self.pd_avg_prompt_len))
+        mu_O = max(1.0, float(self.pd_avg_output_tokens))
+
+        # Step 2: θ_0 from the exact formula.
+        theta_zero = self._compute_theta_zero_exact(p_0)
+        theta_zero_clamped = max(0.01, min(self.pd_theta_max, theta_zero))
+
+        # Step 3: Optional dynamic N̂ from memory-safe sizing (Prop. memory).
+        if self.pd_auto_compute_n:
+            n_hat = self._compute_memory_safe_n(theta_zero_clamped, p_0, mu_L)
+            if n_hat != self.pd_batch_size_N:
+                self._record_n_update(
+                    self.pd_batch_size_N, n_hat, "cfr_memory_safe")
+                self.pd_batch_size_N = n_hat
+        n_eff = max(1, self.pd_batch_size_N)
+
+        # Step 4: Midpoint k̂.
+        k_hat_real, m_minus, m_plus, m_star = self._compute_midpoint_k(
+            theta_zero_clamped, p_0, n_eff, mu_L)
+        k_hat_int = max(1, min(n_eff - 1, int(round(k_hat_real))))
+
+        # Step 5: Diagnostic Δ(N) (used by adaptive selector / auto mode).
+        delta_diag = self._compute_diagnostic_delta(
+            theta_zero_clamped, k_hat_real, n_eff, mu_L, mu_O)
+
+        # Step 6: EMA smoothing on the realised θ̂ = k̂ / N̂ to damp noise.
+        theta_hat = k_hat_real / float(n_eff)
+        theta_hat = max(0.01, min(self.pd_theta_max, theta_hat))
+        if not self.pd_ifr_theta_initialized:
+            self.pd_k_ratio = theta_hat
+            self.pd_ifr_theta_initialized = True
+        else:
+            alpha = self.pd_ifr_theta_ema_alpha
+            self.pd_k_ratio = alpha * theta_hat + (1 - alpha) * self.pd_k_ratio
+        # Switch threshold uses the smoothed ratio scaled to current N.
+        self.pd_switch_threshold_k = max(1, int(self.pd_k_ratio * n_eff))
+
+        # Surface diagnostics for stats / analysis.
+        self.pd_theta_zero_last = theta_zero_clamped
+        self.pd_k_hat_midpoint_last = k_hat_real
+        self.pd_n_hat_safe_last = float(n_eff)
+        self.pd_delta_diagnostic_last = delta_diag
+
+        self.pd_cfr_update_history.append({
+            "timestamp": time.monotonic() - self._pd_start_time,
+            "p_0_estimate": p_0,
+            "mu_L_estimate": mu_L,
+            "mu_O_estimate": mu_O,
+            "theta_0": theta_zero_clamped,
+            "k_hat_real": k_hat_real,
+            "k_hat_int": int(self.pd_switch_threshold_k),
+            "N_hat": int(n_eff),
+            "M_minus": int(m_minus),
+            "M_plus": int(m_plus),
+            "M_star": int(m_star),
+            "delta_diagnostic": delta_diag,
+            "samples_used": len(self.pd_ifr_samples),
+            "oom_event_count": int(self.pd_oom_event_count),
+        })
+
+        if (abs(self.pd_k_ratio - old_ratio) > 0.01
+                or old_k != self.pd_switch_threshold_k
+                or old_n != self.pd_batch_size_N):
+            logger.info(
+                f"[P/D CFR] midpoint update: θ_0={theta_zero_clamped:.4f}, "
+                f"θ̂={old_ratio:.4f}->{self.pd_k_ratio:.4f}, "
+                f"k̂={old_k}->{self.pd_switch_threshold_k}, "
+                f"N̂={old_n}->{self.pd_batch_size_N} "
+                f"(p_0={p_0:.6f}, μ_L={mu_L:.0f}, μ_O={mu_O:.0f}, "
+                f"M*={m_star}, Δ={delta_diag:.6f})"
+            )
+
+    def _record_n_update(self, old_n: int, new_n: int, reason: str) -> None:
+        """Record an N update event for trajectory tracking."""
+        if old_n == new_n:
+            return
+        timestamp = time.monotonic() - self._pd_start_time
+        self.pd_n_update_history.append({
+            "timestamp": timestamp,
+            "old_N": old_n,
+            "new_N": new_n,
+            "reason": reason,
+            "k_star": self.pd_switch_threshold_k,
+            "avg_output_tokens": self.pd_avg_output_tokens,
+        })
+
+    def _compute_adaptive_kv_threshold(self) -> float:
+        """
+        Compute adaptive KV cache threshold based on average output tokens.
+
+        The idea: Reserve enough KV cache space for decoding phase.
+        - If avg_output_tokens is high, reserve more space (higher threshold)
+        - If avg_output_tokens is low, can use more cache for prefill
+
+        Formula:
+        - expected_decode_blocks = N * avg_output_tokens * margin / block_size
+        - threshold = expected_decode_blocks / total_blocks + base_reserve
+
+        Returns:
+            float: KV cache threshold (fraction of total blocks to reserve)
+        """
+        if not hasattr(self.kv_cache_manager, 'block_pool'):
+            return 0.05  # Default fallback
+
+        total_blocks = self.kv_cache_manager.block_pool.num_gpu_blocks
+        if total_blocks <= 0:
+            return 0.05
+
+        # Expected blocks needed for decode phase
+        # Each request needs avg_output_tokens * margin for safety
+        tokens_per_block = self.block_size
+        expected_output_tokens = self.pd_avg_output_tokens * self.pd_output_margin
+
+        # For N decoding requests, total blocks needed
+        blocks_for_decode = (
+            self.pd_batch_size_N * expected_output_tokens / tokens_per_block
+        )
+
+        # Compute threshold: reserve this fraction of total blocks
+        reserve_ratio = blocks_for_decode / total_blocks
+
+        # Add base reserve and clamp to reasonable bounds [0.05, 0.6]
+        threshold = reserve_ratio + self.pd_base_kv_reserve
+        threshold = max(0.05, min(0.6, threshold))
+
+        return threshold
+
+    def _compute_adaptive_N(self) -> int:
+        """
+        Compute adaptive batch size N based on KV cache capacity and avg output.
+
+        The idea: N should be chosen such that:
+        - All N requests can be prefilled
+        - There's enough KV cache left for decode phase
+
+        Constraint:
+        - N * (avg_prompt + avg_output * margin) / block_size <= total_blocks * (1 - reserve)
+
+        Solving for N:
+        - N <= total_blocks * (1 - reserve) * block_size / (avg_prompt + avg_output * margin)
+
+        Returns:
+            int: Adaptive batch size N
+        """
+        if not hasattr(self.kv_cache_manager, 'block_pool'):
+            return self.max_num_running_reqs
+
+        total_blocks = self.kv_cache_manager.block_pool.num_gpu_blocks
+        if total_blocks <= 0:
+            return self.max_num_running_reqs
+
+        # Estimate average prompt tokens from running/waiting requests
+        avg_prompt_tokens = 512  # Default estimate
+        sample_requests = list(self.running)[:50] + list(self.waiting)[:50]
+        if sample_requests:
+            total_prompt = sum(r.num_prompt_tokens for r in sample_requests)
+            avg_prompt_tokens = total_prompt / len(sample_requests)
+
+        # Expected tokens per request (prompt + output with margin)
+        expected_output = self.pd_avg_output_tokens * self.pd_output_margin
+        tokens_per_request = avg_prompt_tokens + expected_output
+
+        # Available blocks (with base reserve for safety)
+        available_blocks = total_blocks * (1.0 - self.pd_base_kv_reserve)
+
+        # Compute adaptive N
+        blocks_per_request = tokens_per_request / self.block_size
+        adaptive_n = int(available_blocks / blocks_per_request)
+
+        # Clamp to reasonable bounds
+        min_n = max(16, self.max_num_running_reqs // 10)
+        max_n = self.max_num_running_reqs
+        adaptive_n = max(min_n, min(max_n, adaptive_n))
+
+        return adaptive_n
+
+    # @cprofile("update_params_online.prof")
+    def _update_params_online(self, output_tokens: int) -> None:
+        """
+        Unified parameter update with configurable interval.
+
+        Updates all parameters together: avg_output_tokens, p, k*, θ*
+        Hot path (every request): Only two integer additions.
+        Cold path (every pd_param_update_interval requests): Update all params.
+
+        k* update behavior by mode:
+        - "direct": k* 根据 Proposition 1 计算（除非用户指定了 VLLM_PD_K_STAR）
+        - "ratio":  k* = θ* × N, θ* 根据 p 计算（除非用户指定了 VLLM_PD_K_RATIO）
+        - "ifr":    k* = θ* × N, θ* 根据 IFR 校正公式计算（基于 hazard rate 估计）
+        """
+        # HOT PATH: Only integer operations (zero overhead)
+        self.pd_batch_completed_count += 1
+        self.pd_batch_total_output_tokens += output_tokens
+
+        # IFR mode: online adaptive update (Algorithm 2)
+        if self.pd_k_mode == "ifr":
+            # Append to sliding window (deque with maxlen auto-evicts)
+            self.pd_ifr_samples.append(output_tokens)
+            self.pd_ifr_update_counter += 1
+
+            # Check if we should update threshold (independent of other params)
+            if (self.pd_ifr_update_counter >= self.pd_ifr_update_interval
+                    and len(self.pd_ifr_samples) >= self.pd_ifr_min_samples):
+                self._update_ifr_threshold()
+                self.pd_ifr_update_counter = 0
+
+        # CFR mode: online midpoint update (Algorithm alg:midpoint)
+        elif self.pd_k_mode == "cfr":
+            self.pd_ifr_samples.append(output_tokens)
+            self.pd_ifr_update_counter += 1
+            if (self.pd_ifr_update_counter >= self.pd_ifr_update_interval
+                    and len(self.pd_ifr_samples) >= self.pd_ifr_min_samples):
+                self._update_cfr_threshold()
+                self.pd_ifr_update_counter = 0
+
+        # Check if we've reached the update interval
+        if self.pd_batch_completed_count < self.pd_param_update_interval:
+            return  # Fast exit - no expensive operations
+
+        # COLD PATH: Reached threshold, do the expensive operations
+        _cold_path_start = time.perf_counter()
+
+        self.pd_total_completed += self.pd_batch_completed_count
+
+        if self.pd_batch_total_output_tokens > 0:
+            batch_mean_len = (self.pd_batch_total_output_tokens /
+                              self.pd_batch_completed_count)
+            batch_p = 1.0 / batch_mean_len
+
+            if not self.pd_param_initialized:
+                # First batch: direct assignment
+                self.pd_p = batch_p
+                self.pd_avg_output_tokens = batch_mean_len
+                self.pd_param_initialized = True
+            else:
+                # EMA update
+                self.pd_p = (self.pd_ema_alpha * batch_p +
+                             (1 - self.pd_ema_alpha) * self.pd_p)
+                self.pd_avg_output_tokens = (
+                    self.pd_ema_alpha * batch_mean_len +
+                    (1 - self.pd_ema_alpha) * self.pd_avg_output_tokens)
+
+            # Update k* based on mode (skip if user specified fixed value)
+            if self.pd_k_mode == "direct" and not self.pd_k_star_user_specified:
+                old_k = self.pd_switch_threshold_k
+                # Recompute k* (depends on p and N)
+                self.pd_switch_threshold_k = self._compute_optimal_k()
+
+                if old_k != self.pd_switch_threshold_k:
+                    logger.info(
+                        f"[P/D] k* update: {old_k}->{self.pd_switch_threshold_k} "
+                        f"(p={self.pd_p:.4f}, mean_len={batch_mean_len:.1f})"
+                    )
+
+            elif self.pd_k_mode == "ratio" and not self.pd_k_ratio_user_specified:
+                old_ratio = self.pd_k_ratio
+                old_k = self.pd_switch_threshold_k
+                self.pd_k_ratio = self._compute_optimal_ratio()
+
+                if self.pd_k_ratio != old_ratio:
+                    self.pd_switch_threshold_k = self._compute_k_from_ratio()
+                    logger.info(
+                        f"[P/D] ratio update: θ*={old_ratio:.4f}->{self.pd_k_ratio:.4f}, "
+                        f"k*={old_k}->{self.pd_switch_threshold_k} "
+                        f"(p={self.pd_p:.4f}, mean_len={batch_mean_len:.1f})"
+                    )
+
+            # Note: IFR mode uses independent online update mechanism
+            # (see _update_ifr_threshold called from hot path)
+
+        # THETA+ mode selection (only in auto mode)
+        if self.scheduler_mode == "auto":
+            self._evaluate_mode_switch()
+
+        # Reset batch accumulators
+        self.pd_batch_completed_count = 0
+        self.pd_batch_total_output_tokens = 0
+
+        # Record cold path timing
+        _cold_path_elapsed = (time.perf_counter() - _cold_path_start) * 1e6
+        self._param_update_count += 1
+        self._param_update_total_us += _cold_path_elapsed
+        self._last_param_update_us = _cold_path_elapsed
+
+    # ================================================================
+    # THETA+ Adaptive Mode Selection (Algorithm 2 extension)
+    # ================================================================
+
+    def _evaluate_mode_switch(self) -> None:
+        """Evaluate the Proposition 2 crossover condition and switch mode.
+
+        Called every pd_param_update_interval completions from the cold path.
+        Decision:
+          LHS = β_CP_e(r̂) - β_EB_w
+          RHS = (1/(μ_L+μ_o)) * [
+                  (α_p - α_d·ln(1-θ₀)·μ_o)/(θ₀·N_obs)
+                  - α_CP·(1+μ_o)/N_obs
+                ]
+          Switch to EB if LHS > RHS + δ  (contention dominates)
+          Switch to CP if LHS < RHS - δ  (amortization dominates)
+        """
+        import math
+
+        # Wait for enough samples before making decisions
+        if not self.pd_param_initialized:
+            return
+
+        # --- Compute workload statistics ---
+        mu_o = self.pd_avg_output_tokens
+        mu_L = self._avg_prompt_len
+        if mu_L + mu_o <= 0:
+            return
+
+        # Steady-state decode ratio: r = μ_o / (μ_L + μ_o)
+        r = mu_o / (mu_L + mu_o)
+        # Batch occupancy
+        N_obs = max(1.0, self._n_obs)
+
+        # --- LHS: β_CP_e(r̂) - β_EB_w ---
+        # β_EB_w: workload-weighted exclusive marginal cost
+        beta_EB_w = ((self.pd_beta_p * mu_L + self.pd_beta_d * mu_o)
+                     / (mu_L + mu_o))
+
+        # β_CP_e(r): CP effective marginal cost from offline profile
+        if self._cp_cost_profiled:
+            beta_CP_e = (self._cp_cost_a
+                         + self._cp_cost_b * r
+                         + self._cp_cost_c * r * r)
+        else:
+            # Fallback: no profiled CP cost → LHS = 0
+            # Decision driven entirely by overhead comparison (RHS)
+            beta_CP_e = beta_EB_w
+
+        LHS = beta_CP_e - beta_EB_w
+
+        # --- RHS: amortized fixed-cost comparison ---
+        # θ₀: current ratio (from IFR or ratio estimator)
+        theta0 = self.pd_k_ratio if hasattr(self, 'pd_k_ratio') else 0.5
+        if theta0 <= 0 or theta0 >= 1:
+            return  # invalid, skip
+
+        log_1_minus_theta = math.log(1 - theta0)  # negative
+        eb_overhead = ((self.pd_alpha_p
+                        - self.pd_alpha_d * log_1_minus_theta * mu_o)
+                       / (theta0 * N_obs))
+        cp_overhead = self._alpha_cp * (1 + mu_o) / N_obs
+
+        RHS = (1.0 / (mu_L + mu_o)) * (eb_overhead - cp_overhead)
+
+        # --- Decision with hysteresis ---
+        delta = self._mode_switch_delta
+
+        if self._mode_cooldown > 0:
+            self._mode_cooldown -= 1
+            return
+
+        old_mode = self._active_scheduler
+        if LHS > RHS + delta:
+            # Contention dominates → EB is better
+            if self._active_scheduler != "eb":
+                self._transition_to_eb()
+                self._mode_cooldown = self._mode_cooldown_max
+        elif LHS < RHS - delta:
+            # Amortization dominates → CP is better
+            if self._active_scheduler != "cp":
+                self._transition_to_cp()
+                self._mode_cooldown = self._mode_cooldown_max
+
+        # Log mode switch
+        if self._active_scheduler != old_mode:
+            self._mode_switch_count += 1
+            switch_record = {
+                "timestamp": time.monotonic() - self._pd_start_time,
+                "old_mode": old_mode,
+                "new_mode": self._active_scheduler,
+                "LHS": LHS,
+                "RHS": RHS,
+                "delta": delta,
+                "r": r,
+                "mu_L": mu_L,
+                "mu_o": mu_o,
+                "N_obs": N_obs,
+                "theta0": theta0,
+                "beta_CP_e": beta_CP_e,
+                "beta_EB_w": beta_EB_w,
+                "total_completed": self.pd_total_completed,
+            }
+            self._mode_switch_history.append(switch_record)
+            logger.info(
+                f"[THETA+] Mode switch: {old_mode} -> "
+                f"{self._active_scheduler} | "
+                f"LHS={LHS:.6f}, RHS={RHS:.6f}, r={r:.3f}, "
+                f"N_obs={N_obs:.1f}, θ₀={theta0:.4f}, "
+                f"β_CP_e={beta_CP_e:.6f}, β_EB_w={beta_EB_w:.6f}"
+            )
+
+    def _transition_to_eb(self) -> None:
+        """Transition from CP mode to EB mode.
+
+        Build pd_decoding_requests from current running set and set
+        appropriate PD phase state.
+        """
+        self._active_scheduler = "eb"
+
+        # Populate pd_decoding_requests from running requests in decode phase
+        self.pd_decoding_requests.clear()
+        for req in self.running:
+            if req.num_computed_tokens >= req.num_prompt_tokens:
+                self.pd_decoding_requests.add(req.request_id)
+
+        num_decoding = len(self.pd_decoding_requests)
+        has_waiting = len(self.waiting) > 0
+
+        if num_decoding > 0:
+            # We have decoding requests → enter Phase 1 (Decode)
+            self.pd_phase = 1
+            self.pd_completed_decode_count = 0
+            self.pd_prefilled_count = num_decoding
+            self.pd_refill_target = 0
+            # Update N to reflect actual demand (running + waiting),
+            # capped at max_num_running_reqs.  Without this, a CP→EB
+            # transition under light running but heavy waiting (e.g. a
+            # concurrency spike) would leave N tiny, starving prefill.
+            self.pd_batch_size_N = min(
+                num_decoding + len(self.waiting),
+                self.max_num_running_reqs)
+            self._update_k_star()
+        elif has_waiting:
+            # No decoding but have waiting → start fresh at Phase 0
+            self._reset_pd_to_initial()
+        else:
+            # Nothing to do
+            self.pd_phase = 0
+            self.pd_prefilled_count = 0
+            self.pd_completed_decode_count = 0
+            self.pd_refill_target = 0
+
+        logger.info(
+            f"[THETA+] CP -> EB: phase={self.pd_phase}, "
+            f"decoding={num_decoding}, running={len(self.running)}, "
+            f"N={self.pd_batch_size_N}, k*={self.pd_switch_threshold_k}"
+        )
+
+    def _transition_to_cp(self) -> None:
+        """Transition from EB mode to CP mode.
+
+        The running list is shared so CP can immediately schedule all
+        requests. Clear PD-specific tracking state.
+        """
+        self._active_scheduler = "cp"
+
+        # Clear PD tracking state — CP doesn't use it.
+        # Will be rebuilt if we switch back to EB.
+        self.pd_decoding_requests.clear()
+        self.pd_phase = 0
+        self.pd_prefilled_count = 0
+        self.pd_completed_decode_count = 0
+        self.pd_refill_target = 0
+
+        logger.info(
+            f"[THETA+] EB -> CP: running={len(self.running)}, "
+            f"waiting={len(self.waiting)}"
+        )
+
+    def _preempt_chunk_prefilling(self) -> tuple[int, int]:
+        """Preempt all chunk_prefilling requests to free KV cache.
+
+        Returns:
+            Tuple of (num_preempted_chunks, num_preempted_tokens)
+        """
+        preempted_chunks = 0
+        preempted_tokens = 0
+        for req in list(self.chunk_prefilling):
+            preempted_tokens += req.num_computed_tokens
+            self.kv_cache_manager.free(req)
+            if hasattr(self, 'encoder_cache_manager'):
+                self.encoder_cache_manager.free(req)
+            req.status = RequestStatus.PREEMPTED
+            req.num_computed_tokens = 0
+            req.num_preemptions += 1
+            self.running.remove(req)
+            self.waiting.prepend_request(req)
+            preempted_chunks += 1
+        self.chunk_prefilling.clear()
+        return preempted_chunks, preempted_tokens
+
+    def _update_k_star(self) -> None:
+        """Update k* (switch threshold) based on current mode.
+
+        - direct mode: if user specified k*, don't update; otherwise recompute
+        - ratio mode: if user specified ratio, don't update; otherwise recompute
+        - ifr mode: uses independent online update (see _update_ifr_threshold)
+        """
+        if self.pd_k_mode == "direct":
+            if not self.pd_k_star_user_specified:
+                self.pd_switch_threshold_k = self._compute_optimal_k()
+        elif self.pd_k_mode == "ratio":
+            if not self.pd_k_ratio_user_specified:
+                self.pd_switch_threshold_k = self._compute_k_from_ratio()
+        elif self.pd_k_mode == "ifr":
+            # IFR mode uses independent online update mechanism
+            # Only recalculate k* from current ratio (N may have changed)
+            self.pd_switch_threshold_k = self._compute_k_from_ratio()
+
+    def _apply_long_prefill_threshold(self, num_tokens: int) -> int:
+        """Apply long prefill token threshold if configured."""
+        threshold = self.scheduler_config.long_prefill_token_threshold
+        if 0 < threshold < num_tokens:
+            return threshold
+        return num_tokens
+
+    @staticmethod
+    def _is_prefill(req: Request) -> bool:
+        """Check if request is in prefill phase."""
+        return req.num_computed_tokens < req.num_prompt_tokens
+
+    # @cprofile("handle_phase_transition.prof")
+    def _handle_phase_transition(self) -> None:
+        """
+        Handle P/D phase transitions based on current state.
+
+        Updates self.pd_phase based on:
+        - Phase 0 -> 1: When N prefilled or no more waiting
+        - Phase 1 -> 2: When k decoded AND k waiting available
+        - Phase 2 -> 1: When k prefilled or no more waiting
+        - Reset to 0: When idle (no decode work, no running, has waiting)
+        """
+        # Cleanup orphans only if there's a size mismatch (fast check first)
+        num_running = len(self.running)
+        if len(self.pd_decoding_requests) > num_running:
+            running_ids = {req.request_id for req in self.running}
+            orphaned_ids = self.pd_decoding_requests - running_ids
+            if orphaned_ids:
+                logger.warning("[P/D] Cleaning %d orphaned decoding IDs",
+                               len(orphaned_ids))
+                self.pd_decoding_requests -= orphaned_ids
+
+        num_pending_chunks = len(self.chunk_prefilling)
+        if num_pending_chunks > 0:
+            running_set = set(self.running)
+            # Clean up: 1) requests not in running, 2) requests that completed prefill
+            orphaned_chunks = [r for r in self.chunk_prefilling
+                               if r not in running_set
+                               or r.num_computed_tokens >= r.num_prompt_tokens]
+            if orphaned_chunks:
+                logger.warning("[P/D] Cleaning %d orphaned/completed chunk_prefilling",
+                               len(orphaned_chunks))
+                for req in orphaned_chunks:
+                    self.chunk_prefilling.remove(req)
+                    # If prefill completed, add to decoding set and count
+                    if (req in running_set
+                            and req.num_computed_tokens >= req.num_prompt_tokens
+                            and req.request_id not in self.pd_decoding_requests):
+                        self.pd_decoding_requests.add(req.request_id)
+                        self.pd_prefilled_count += 1
+                num_pending_chunks = len(self.chunk_prefilling)
+
+        num_decoding = len(self.pd_decoding_requests)
+        has_decoding = num_decoding > 0
+        waiting_count = len(self.waiting) + num_pending_chunks
+        has_waiting = waiting_count > 0
+        has_pending_chunks = num_pending_chunks > 0
+        prev_phase = self.pd_phase
+
+        # Check if KV cache usage exceeds adaptive threshold
+        # The threshold is learned based on average output tokens:
+        # - Higher avg output tokens -> higher threshold (reserve more for decode)
+        # - Lower avg output tokens -> lower threshold (can use more for prefill)
+        # When threshold exceeded, allow phase transitions even with pending chunks
+        # to prevent deadlock - chunks will continue after decode frees memory
+        kv_cache_full = False
+        adaptive_threshold = self._compute_adaptive_kv_threshold()
+        if hasattr(self.kv_cache_manager, 'block_pool'):
+            total_blocks = self.kv_cache_manager.block_pool.num_gpu_blocks
+            free_blocks = self.kv_cache_manager.block_pool.get_num_free_blocks()
+            kv_cache_full = free_blocks < total_blocks * adaptive_threshold
+
+        if self.pd_phase == 0:
+            # Initial prefill -> decode when N prefilled OR no more waiting
+            # When KV cache is full, allow transition even with pending chunks
+            can_transition = not has_pending_chunks or kv_cache_full
+            if self.pd_prefilled_count >= self.pd_batch_size_N:
+                if can_transition:
+                    self.pd_phase = 1
+                    self.pd_completed_decode_count = 0
+                else:
+                    logger.info(
+                        f"[P/D] Phase 0: waiting for {num_pending_chunks} "
+                        f"chunked prefills to complete before decode"
+                    )
+            # KV cache full escape - transition to decode to free memory
+            # Use adaptive N based on avg output tokens to prevent preemptions
+            # IMPORTANT: Proactively preempt chunk_prefilling requests to free KV
+            # cache. These requests cannot continue in Phase 1, and if we let them
+            # sit idle, they will be preempted anyway when decode needs more space.
+            # Better to free them now (proactive) than later (reactive).
+            elif kv_cache_full and has_decoding:
+                adaptive_n = self._compute_adaptive_N()
+                min_n = max(16, self.max_num_running_reqs // 10)
+                # Use the smaller of adaptive_n and current prefilled_count
+                # to ensure we don't oversubscribe KV cache
+                new_n = min(adaptive_n, self.pd_prefilled_count)
+                if new_n >= min_n:
+                    self._update_batch_size_n(new_n, "kv_escape")
+
+                # Proactively preempt chunk_prefilling requests
+                preempted_chunks, preempted_tokens = self._preempt_chunk_prefilling()
+
+                logger.info(
+                    f"[P/D] KV cache threshold ({adaptive_threshold:.2%}) escape: "
+                    f"phase 0->1 with {self.pd_prefilled_count} prefilled, "
+                    f"{waiting_count} waiting, adaptive_N={adaptive_n}, "
+                    f"avg_output={self.pd_avg_output_tokens:.1f}, "
+                    f"preempted_chunks={preempted_chunks} "
+                    f"(freed {preempted_tokens} computed tokens)"
+                )
+                self.pd_phase = 1
+                self.pd_completed_decode_count = 0
+            elif not has_waiting and has_decoding and can_transition:
+                # Adjust N to actual prefilled count, but keep a minimum
+                # to avoid cold-start degradation (min 10% of max or 16)
+                min_n = max(16, self.max_num_running_reqs // 10)
+                if self.pd_prefilled_count >= min_n:
+                    self._update_batch_size_n(self.pd_prefilled_count, "cold_start")
+                # If prefilled count is too low, don't adjust N down
+                # This prevents cold-start from permanently reducing batch size
+                self.pd_phase = 1
+                self.pd_completed_decode_count = 0
+
+        elif self.pd_phase == 1:
+            # RECOVERY: If N is too small relative to demand (e.g. after a
+            # CP→EB transition under light running but heavy waiting, or a
+            # cold-start), scale N up so that the 1→2 transition can refill
+            # enough requests to keep the pipeline busy.
+            target_n = self.max_num_running_reqs
+            if (self.pd_batch_size_N < target_n
+                    and waiting_count >= target_n // 2
+                    and (time.monotonic() - self.pd_last_n_update_time
+                         >= self.pd_n_update_cooldown)):
+                old_n = self.pd_batch_size_N
+                self.pd_batch_size_N = target_n
+                self._update_k_star()
+                self.pd_last_n_update_time = time.monotonic()
+                self._record_n_update(old_n, self.pd_batch_size_N, "recovery")
+                logger.info(
+                    f"[P/D] N RECOVERY: {old_n} -> {self.pd_batch_size_N} "
+                    f"(queue filled, k*={self.pd_switch_threshold_k}, "
+                    f"avg_out={self.pd_avg_output_tokens:.1f})"
+                )
+
+            # Decode -> prefill when ratio condition met:
+            #   min(q, N-n) / n >= k* / (N-k*)  i.e.  θ*/(1-θ*)
+            # Preserves steady-state ratio θ* regardless of batch size,
+            # naturally degrading to continuous-batching behavior under light load.
+            # Uses integer arithmetic to avoid float division:
+            #   fillable * (N - k*) >= n * k*
+            if num_decoding > 0:
+                N = self.pd_batch_size_N
+                k_star = self.pd_switch_threshold_k
+                fillable = min(waiting_count, max(0, N - num_decoding))
+                denom = N - k_star
+                if denom > 0 and fillable * denom >= num_decoding * k_star:
+                    self.pd_refill_target = fillable
+                    self.pd_phase = 2
+                    self.pd_prefilled_count = 0
+            # RESET: All decode requests completed, go back to Phase 0
+            # Note: running may still have chunked prefill requests that will
+            # continue in Phase 0. We only check has_decoding (pd_decoding_requests)
+            # instead of len(running)==0 to allow this.
+            elif not has_decoding and has_waiting:
+                self._reset_pd_to_initial()
+
+        elif self.pd_phase == 2:
+            # Refill prefill -> decode when refill target met OR no more waiting
+            # OR KV cache is full (to prevent deadlock)
+            ready_to_decode = (
+                self.pd_prefilled_count >= self.pd_refill_target
+                or (not has_waiting and has_decoding)
+                or kv_cache_full)  # KV cache full escape
+            if ready_to_decode:
+                # When KV cache is full, must transition even with pending chunks
+                # to free memory. Proactively preempt them to free KV cache.
+                # Otherwise, wait for chunked prefills to complete.
+                if not has_pending_chunks or kv_cache_full:
+                    if kv_cache_full and has_pending_chunks:
+                        preempted_chunks, preempted_tokens = (
+                            self._preempt_chunk_prefilling())
+                        logger.info(
+                            f"[P/D] Phase 2->1: preempted {preempted_chunks} "
+                            f"chunks (freed {preempted_tokens} computed tokens, "
+                            f"KV full)"
+                        )
+                    self.pd_phase = 1
+                    self.pd_completed_decode_count = 0
+                else:
+                    logger.info(
+                        f"[P/D] Phase 2: waiting for {num_pending_chunks} "
+                        f"chunked prefills to complete before decode"
+                    )
+
+        # Log phase transition
+        if prev_phase != self.pd_phase:
+            logger.info(
+                f"[P/D] {self.PD_PHASE_NAMES[prev_phase]} -> "
+                f"{self.PD_PHASE_NAMES[self.pd_phase]} | "
+                f"prefilled={self.pd_prefilled_count}, "
+                f"decoded={self.pd_completed_decode_count}, "
+                f"k*={self.pd_switch_threshold_k}, "
+                f"refill_target={self.pd_refill_target}, "
+                f"decoding={num_decoding}, N={self.pd_batch_size_N}, "
+                f"avg_out={self.pd_avg_output_tokens:.1f}, "
+                f"kv_thresh={adaptive_threshold:.2%}"
+            )
+
+    def _update_batch_size_n(self, new_n: int, reason: str = "update") -> None:
+        """Update batch size N and recompute k* (ratio-based or optimal)."""
+        if new_n != self.pd_batch_size_N:
+            old_n, old_k = self.pd_batch_size_N, self.pd_switch_threshold_k
+            self.pd_batch_size_N = new_n
+            self._update_k_star()
+            self.pd_last_n_update_time = time.monotonic()
+            self._record_n_update(old_n, new_n, reason)
+            logger.info(
+                f"[P/D] N update: {old_n}->{new_n}, k*={old_k}->{self.pd_switch_threshold_k}"
+            )
+
+    def _reset_pd_to_initial(self) -> None:
+        """Reset P/D scheduler to initial state."""
+        old_n = self.pd_batch_size_N
+        self.pd_batch_size_N = self.max_num_running_reqs
+        self._update_k_star()
+        self.pd_last_n_update_time = time.monotonic()
+        self._record_n_update(old_n, self.pd_batch_size_N, "reset")
+        logger.info(
+            f"[P/D] RESET: phase {self.pd_phase}->0 | "
+            f"N={old_n}->{self.pd_batch_size_N}, k*={self.pd_switch_threshold_k}, "
+            f"avg_out={self.pd_avg_output_tokens:.1f}"
+        )
+        self.pd_phase = 0
+        self.pd_prefilled_count = 0
+        self.pd_completed_decode_count = 0
+        self.pd_refill_target = 0
+
+    def schedule_pd(self) -> SchedulerOutput:
+        """
+        P/D Competition Scheduler with batch-based switching:
+
+        Phase 0 (Initial Prefill): Prefill N requests
+        Phase 1 (Decode): Decode all requests until k complete
+        Phase 2 (Refill Prefill): Prefill k new requests (no decode)
+        Then back to Phase 1: Decode (N-k old + k new) until k complete
+        ...repeat...
+
+        k is the switching threshold (can be optimized later).
+        """
+        scheduled_new_reqs: list[Request] = []
+        scheduled_resumed_reqs: list[Request] = []
+        scheduled_running_reqs: list[Request] = []
+        preempted_reqs: list[Request] = []
+        effective_lookahead_tokens = 0
+        req_to_new_blocks: dict[str, KVCacheBlocks] = {}
+        num_scheduled_tokens: dict[str, int] = {}
+        token_budget = self.max_num_scheduled_tokens
+        scheduled_encoder_inputs: dict[str, list[int]] = {}
+        scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        scheduled_timestamp = time.monotonic()
+
+        # Handle phase transitions
+        self._handle_phase_transition()
+
+        # ===== PREFILL SCHEDULING (Phase 0 or Phase 2) =====
+        if self.pd_phase in (0, 2):
+            target = (self.pd_batch_size_N if self.pd_phase == 0
+                      else self.pd_refill_target)
+            remaining = target - self.pd_prefilled_count
+
+            # Continue chunked prefills first
+            # Note: We don't check `remaining > 0` here because we must continue
+            # all existing chunked prefills to prevent deadlock. The `remaining`
+            # counter only limits NEW prefills from the waiting queue.
+            if self.scheduler_config.enable_chunked_prefill:
+                req_index = 0
+                while (req_index < len(self.chunk_prefilling)
+                       and token_budget > 0):
+                    request = self.chunk_prefilling[req_index]
+
+                    if not self._is_prefill(request):
+                        req_index += 1
+                        continue
+                    if request.request_id in num_scheduled_tokens:
+                        req_index += 1
+                        continue
+
+                    num_new_tokens = request.num_tokens - request.num_computed_tokens
+                    num_new_tokens = self._apply_long_prefill_threshold(num_new_tokens)
+                    num_new_tokens = min(num_new_tokens, token_budget)
+                    if num_new_tokens <= 0:
+                        req_index += 1
+                        continue
+
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request, num_new_tokens,
+                        num_lookahead_tokens=effective_lookahead_tokens)
+                    if new_blocks is None:
+                        req_index += 1
+                        continue
+
+                    # Check if prefill completes
+                    # Use num_prompt_tokens (not num_tokens) to match is_prefill() logic
+                    will_complete = (request.num_prompt_tokens - request.num_computed_tokens
+                                     <= num_new_tokens)
+                    if will_complete:
+                        self.chunk_prefilling.remove(request)
+                        self.pd_prefilled_count += 1
+                        remaining -= 1
+                        self.pd_decoding_requests.add(request.request_id)
+                    else:
+                        req_index += 1
+
+                    scheduled_running_reqs.append(request)
+                    req_to_new_blocks[request.request_id] = new_blocks
+                    num_scheduled_tokens[request.request_id] = num_new_tokens
+                    token_budget -= num_new_tokens
+
+            # Schedule new prefills from waiting queue
+            skipped = create_request_queue(self.policy)
+            while self.waiting and token_budget > 0 and remaining > 0:
+                if len(self.running) >= self.max_num_running_reqs:
+                    break
+
+                request = self.waiting.peek_request()
+
+                num_external_computed_tokens = 0
+                if request.num_computed_tokens == 0:
+                    new_computed_blocks, num_local = (
+                        self.kv_cache_manager.get_computed_blocks(request))
+                    num_computed_tokens = num_local + num_external_computed_tokens
+                else:
+                    new_computed_blocks = self.kv_cache_manager.empty_kv_cache_blocks
+                    num_local = 0
+                    num_computed_tokens = request.num_computed_tokens
+
+                num_new_tokens = request.num_tokens - num_computed_tokens
+                num_new_tokens = self._apply_long_prefill_threshold(num_new_tokens)
+
+                is_chunked = False
+                if (not self.scheduler_config.enable_chunked_prefill
+                        and num_new_tokens > token_budget):
+                    self.waiting.pop_request()
+                    skipped.prepend_request(request)
+                    continue
+                elif num_new_tokens > token_budget:
+                    is_chunked = True
+
+                num_new_tokens = min(num_new_tokens, token_budget)
+                if num_new_tokens <= 0:
+                    break
+
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    request, num_new_tokens + num_external_computed_tokens,
+                    num_local, new_computed_blocks,
+                    num_lookahead_tokens=effective_lookahead_tokens)
+                if new_blocks is None:
+                    break
+
+                request = self.waiting.pop_request()
+                self.running.append(request)
+
+                if is_chunked:
+                    self.chunk_prefilling.append(request)
+                else:
+                    # Prefill completes in one step
+                    self.pd_prefilled_count += 1
+                    remaining -= 1
+                    self.pd_decoding_requests.add(request.request_id)
+
+                if self.log_stats:
+                    request.record_event(
+                        EngineCoreEventType.SCHEDULED, scheduled_timestamp)
+
+                if request.status == RequestStatus.WAITING:
+                    scheduled_new_reqs.append(request)
+                elif request.status == RequestStatus.PREEMPTED:
+                    scheduled_resumed_reqs.append(request)
+                else:
+                    raise RuntimeError(f"Invalid request status: {request.status}")
+
+                req_to_new_blocks[request.request_id] = (
+                    self.kv_cache_manager.get_blocks(request.request_id))
+                num_scheduled_tokens[request.request_id] = num_new_tokens
+                token_budget -= num_new_tokens
+                request.status = RequestStatus.RUNNING
+                request.num_computed_tokens = num_computed_tokens
+                if request.num_cached_tokens < 0:
+                    request.num_cached_tokens = num_computed_tokens
+
+            if skipped:
+                self.waiting.prepend_requests(skipped)
+
+        # ===== DECODE SCHEDULING (Phase 1 only) =====
+        elif self.pd_phase == 1:
+            req_index = 0
+            while req_index < len(self.running) and token_budget > 0:
+                request = self.running[req_index]
+
+                if request.request_id in num_scheduled_tokens:
+                    req_index += 1
+                    continue
+                if self._is_prefill(request):
+                    req_index += 1
+                    continue
+                # Only decode requests in pd_decoding_requests
+                if request.request_id not in self.pd_decoding_requests:
+                    req_index += 1
+                    continue
+
+                num_new_tokens = (request.num_tokens_with_spec
+                                  + request.num_output_placeholders
+                                  - request.num_computed_tokens)
+                num_new_tokens = self._apply_long_prefill_threshold(num_new_tokens)
+                num_new_tokens = min(num_new_tokens, token_budget)
+
+                max_total = min(request.num_prompt_tokens + request.max_tokens,
+                                self.max_model_len)
+                num_new_tokens = min(num_new_tokens,
+                                     max_total - 1 - request.num_computed_tokens)
+                if num_new_tokens == 0:
+                    req_index += 1
+                    continue
+
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    request, num_new_tokens,
+                    num_lookahead_tokens=self.num_lookahead_tokens)
+
+                if new_blocks is None:
+                    # Need to preempt
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        preempted_req = max(
+                            self.running, key=lambda r: (r.priority, r.arrival_time))
+                        self.running.remove(preempted_req)
+                        if preempted_req in scheduled_running_reqs:
+                            scheduled_running_reqs.remove(preempted_req)
+                            token_budget += num_scheduled_tokens[
+                                preempted_req.request_id]
+                            req_to_new_blocks.pop(preempted_req.request_id)
+                            num_scheduled_tokens.pop(preempted_req.request_id)
+                            req_index -= 1
+                    else:
+                        preempted_req = self.running.pop()
+
+                    self.kv_cache_manager.free(preempted_req)
+                    self.encoder_cache_manager.free(preempted_req)
+                    preempted_req.status = RequestStatus.PREEMPTED
+                    preempted_req.num_computed_tokens = 0
+                    preempted_req.num_preemptions += 1
+                    # P/D scheduling: clean up tracking state and count OOM
+                    # events (each preemption is a KV-cache exhaustion =
+                    # the ε-rate event tracked by Prop. memory).
+                    if self.use_pd_scheduler:
+                        self.pd_oom_event_count += 1
+                    self.pd_decoding_requests.discard(preempted_req.request_id)
+                    if preempted_req in self.chunk_prefilling:
+                        self.chunk_prefilling.remove(preempted_req)
+
+                    if self.log_stats:
+                        preempted_req.record_event(
+                            EngineCoreEventType.PREEMPTED, scheduled_timestamp)
+                    self.waiting.prepend_request(preempted_req)
+                    preempted_reqs.append(preempted_req)
+                    if preempted_req == request:
+                        break
+                    continue
+
+                scheduled_running_reqs.append(request)
+                req_to_new_blocks[request.request_id] = new_blocks
+                num_scheduled_tokens[request.request_id] = num_new_tokens
+                token_budget -= num_new_tokens
+                req_index += 1
+
+        # Construct scheduler output
+        total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
+
+        num_common_prefix_blocks = [0] * len(self.kv_cache_config.kv_cache_groups)
+        if self.running:
+            any_request = self.running[0]
+            num_common_prefix_blocks = (
+                self.kv_cache_manager.get_num_common_prefix_blocks(
+                    any_request.request_id))
+
+        new_reqs_data = [
+            NewRequestData.from_request(
+                req, req_to_new_blocks[req.request_id].get_block_ids())
+            for req in scheduled_new_reqs]
+
+        cached_reqs_data = self._make_cached_request_data(
+            scheduled_running_reqs, scheduled_resumed_reqs,
+            num_scheduled_tokens, scheduled_spec_decode_tokens, req_to_new_blocks)
+
+        self.prev_step_scheduled_req_ids.clear()
+        self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+
+        scheduler_output = SchedulerOutput(
+            scheduled_new_reqs=new_reqs_data,
+            scheduled_cached_reqs=cached_reqs_data,
+            num_scheduled_tokens=num_scheduled_tokens,
+            total_num_scheduled_tokens=total_num_scheduled_tokens,
+            scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
+            scheduled_encoder_inputs=scheduled_encoder_inputs,
+            num_common_prefix_blocks=num_common_prefix_blocks,
+            preempted_req_ids={req.request_id for req in preempted_reqs},
+            finished_req_ids=self.finished_req_ids,
+            free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes())
+
+        with record_function_or_nullcontext("schedule: update_after_schedule"):
+            self._update_after_schedule(scheduler_output)
+        return scheduler_output
+
     def schedule(self) -> SchedulerOutput:
+        """Entry point for scheduling. Dispatches to P/D, default, or auto."""
+        if self._schedule_stats_enabled:
+            t_start = time.perf_counter()
+
+        # Track demand EMA for auto mode (running + waiting = true load)
+        # Using only len(running) is wrong under EB: phase separation
+        # drains running while filling waiting, but total demand is constant.
+        if self.scheduler_mode == "auto":
+            demand = float(len(self.running) + len(self.waiting))
+            # Asymmetric EMA: fast ramp-up (0.3), slow ramp-down (0.03)
+            # so we react quickly to traffic surges but don't prematurely
+            # switch back when demand dips briefly
+            if demand > self._n_obs:
+                a = 0.3   # fast follow upward
+            else:
+                a = 0.03  # slow follow downward
+            self._n_obs = a * demand + (1 - a) * self._n_obs
+
+            # Demand surge detection: if instantaneous demand is 2x the
+            # current EMA AND we haven't evaluated recently, trigger
+            # immediate mode evaluation without waiting for cold path.
+            if (demand > self._n_obs * 2
+                    and self._mode_cooldown == 0
+                    and self.pd_param_initialized):
+                self._evaluate_mode_switch()
+
+        # Dispatch based on scheduler mode
+        if self.scheduler_mode == "auto":
+            if self._active_scheduler == "eb":
+                output = self.schedule_pd()
+            else:
+                output = self._schedule_default()
+        elif self.use_pd_scheduler:
+            output = self.schedule_pd()
+        else:
+            output = self._schedule_default()
+
+        if self._schedule_stats_enabled:
+            t_end = time.perf_counter()
+            self._record_schedule_stats(output, t_end - t_start)
+
+        return output
+
+    def _schedule_default(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -772,6 +2787,12 @@ class Scheduler(SchedulerInterface):
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
 
+        # P/D scheduling: clean up tracking state
+        if self.use_pd_scheduler:
+            self.pd_decoding_requests.discard(request.request_id)
+        if request in self.chunk_prefilling:
+            self.chunk_prefilling.remove(request)
+
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
 
@@ -1128,6 +3149,38 @@ class Scheduler(SchedulerInterface):
                 stopped = check_stop(request, self.max_model_len, pooler_output)
 
             if stopped:
+                # P/D scheduling: count completed decode requests
+                if self.use_pd_scheduler:
+                    if request.request_id in self.pd_decoding_requests:
+                        # EB path: request was tracked in pd_decoding_requests
+                        self.pd_completed_decode_count += 1
+                        self.pd_decoding_requests.discard(request.request_id)
+                        output_tokens = request.num_tokens - request.num_prompt_tokens
+                        if output_tokens > 0:
+                            self._update_params_online(output_tokens)
+                        # Track prompt length (used by CFR midpoint and
+                        # auto-mode selector for mu_L estimation).
+                        pl = float(request.num_prompt_tokens)
+                        a = self.pd_avg_prompt_ema_alpha
+                        self.pd_avg_prompt_len = (
+                            a * pl + (1 - a) * self.pd_avg_prompt_len)
+                        if self.scheduler_mode == "auto":
+                            self._avg_prompt_len = self.pd_avg_prompt_len
+                    elif (self.scheduler_mode == "auto"
+                          and self._active_scheduler == "cp"):
+                        # Auto+CP path: still feed output samples for
+                        # parameter tracking and mode selection
+                        output_tokens = request.num_tokens - request.num_prompt_tokens
+                        if output_tokens > 0:
+                            self._update_params_online(output_tokens)
+                        # Track prompt length EMA for mode selection
+                        prompt_len = float(request.num_prompt_tokens)
+                        a = self.pd_avg_prompt_ema_alpha
+                        self.pd_avg_prompt_len = (
+                            a * prompt_len
+                            + (1 - a) * self.pd_avg_prompt_len)
+                        self._avg_prompt_len = self.pd_avg_prompt_len
+
                 kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -1365,6 +3418,12 @@ class Scheduler(SchedulerInterface):
         # Remove all requests from queues at once for better efficiency
         if running_requests_to_remove:
             self.running = remove_all(self.running, running_requests_to_remove)
+            # P/D scheduling: also remove from decoding set and chunk_prefilling
+            for req in running_requests_to_remove:
+                if self.use_pd_scheduler:
+                    self.pd_decoding_requests.discard(req.request_id)
+                if req in self.chunk_prefilling:
+                    self.chunk_prefilling.remove(req)
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
 
@@ -1507,6 +3566,12 @@ class Scheduler(SchedulerInterface):
         return spec_decoding_stats
 
     def shutdown(self) -> None:
+        # Save schedule stats if collection was enabled
+        if self._schedule_stats_enabled and self._schedule_stats:
+            stats_file = os.environ.get(
+                "VLLM_SCHEDULE_STATS_FILE", "schedule_stats.json")
+            self.save_schedule_stats(stats_file)
+
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
@@ -1803,3 +3868,235 @@ class Scheduler(SchedulerInterface):
         self.failed_recving_kv_req_ids |= async_failed_req_ids
         # Return sync affected IDs to skip in update_from_output
         return sync_failed_req_ids
+
+    # =========================================================================
+    # Schedule Statistics Collection (for performance analysis)
+    # =========================================================================
+
+    def _record_schedule_stats(
+        self, output: SchedulerOutput, elapsed_time: float
+    ) -> None:
+        """Record statistics for a single schedule() call."""
+        # Initialize start time on first call (after warmup/loading completes)
+        if self._schedule_stats_start_time is None:
+            self._schedule_stats_start_time = time.monotonic()
+
+        timestamp = time.monotonic() - self._schedule_stats_start_time
+
+        # Fix timing attribution: update PREVIOUS batch's execution time
+        # The interval between schedule calls represents the previous batch's
+        # model execution time, not the current batch's.
+        if self._schedule_stats:
+            prev_timestamp = self._schedule_stats[-1]["timestamp"]
+            execution_time_us = (timestamp - prev_timestamp) * 1e6
+            self._schedule_stats[-1]["execution_time_us"] = execution_time_us
+
+        # Count prefill vs decode tokens
+        # Note: num_computed_tokens has already been updated by _update_after_schedule,
+        # so we need to subtract num_tokens to get the state BEFORE this scheduling step.
+        prefill_tokens = 0
+        decode_tokens = 0
+        for req_id, num_tokens in output.num_scheduled_tokens.items():
+            req = self.requests.get(req_id)
+            if req:
+                # Get the computed tokens BEFORE this step
+                computed_before = req.num_computed_tokens - num_tokens
+                if computed_before < req.num_prompt_tokens:
+                    # Was in prefill phase at the start of this step
+                    prefill_tokens += num_tokens
+                else:
+                    # Was in decode phase
+                    decode_tokens += num_tokens
+            else:
+                # Request not found (possibly finished), count as decode
+                decode_tokens += num_tokens
+
+        # Count preemption statistics
+        num_preempted_reqs = 0
+        preempted_tokens = 0
+        if output.preempted_req_ids:
+            num_preempted_reqs = len(output.preempted_req_ids)
+            for req_id in output.preempted_req_ids:
+                req = self.requests.get(req_id)
+                if req:
+                    # This is the number of tokens that need to be re-prefilled
+                    preempted_tokens += req.num_prompt_tokens
+
+        self._schedule_stats.append({
+            "timestamp": timestamp,
+            "elapsed_us": elapsed_time * 1e6,
+            "execution_time_us": 0,  # Will be updated by next schedule() call
+            "scheduler_type": (
+                self._active_scheduler
+                if self.scheduler_mode == "auto"
+                else ("pd" if self.use_pd_scheduler else "default")),
+            "scheduler_mode": self.scheduler_mode,
+            "phase": self.pd_phase if self.use_pd_scheduler else -1,
+            "total_tokens": output.total_num_scheduled_tokens,
+            "prefill_tokens": prefill_tokens,
+            "decode_tokens": decode_tokens,
+            "num_new_reqs": len(output.scheduled_new_reqs),
+            "num_running_reqs": len(self.running),
+            "num_waiting_reqs": len(self.waiting),
+            "num_scheduled_reqs": len(output.num_scheduled_tokens),
+            "k_star": self.pd_switch_threshold_k if self.use_pd_scheduler else 0,
+            "k_ratio": self.pd_k_ratio if self.use_pd_scheduler else 0,
+            "refill_target": self.pd_refill_target if self.use_pd_scheduler else 0,
+            "N": self.pd_batch_size_N if self.use_pd_scheduler else 0,
+            "num_decoding_reqs": len(self.pd_decoding_requests) if self.use_pd_scheduler else 0,
+            "num_preempted_reqs": num_preempted_reqs,
+            "preempted_tokens": preempted_tokens,
+            # Adaptive scheduling values
+            "avg_output_tokens": self.pd_avg_output_tokens if self.use_pd_scheduler else 0,
+            "adaptive_kv_threshold": self._compute_adaptive_kv_threshold() if self.use_pd_scheduler else 0,
+            # Hazard rate estimation (IFR / CFR online estimator)
+            "hazard_p0": self.pd_hazard_p0 if (self.use_pd_scheduler and self.pd_k_mode in ("ifr", "cfr")) else 0,
+            "hazard_eta": self.pd_hazard_eta if (self.use_pd_scheduler and self.pd_k_mode in ("ifr", "cfr")) else 0,
+            "ifr_sample_count": len(self.pd_ifr_samples) if (self.use_pd_scheduler and self.pd_k_mode in ("ifr", "cfr")) else 0,
+            # CFR midpoint diagnostics (last update; 0 outside cfr/auto)
+            "mu_L_estimate": self.pd_avg_prompt_len if self.use_pd_scheduler else 0,
+            "mu_O_estimate": self.pd_avg_output_tokens if self.use_pd_scheduler else 0,
+            "theta_zero_last": self.pd_theta_zero_last if self.use_pd_scheduler else 0,
+            "k_hat_midpoint_last": self.pd_k_hat_midpoint_last if self.use_pd_scheduler else 0,
+            "n_hat_safe_last": self.pd_n_hat_safe_last if self.use_pd_scheduler else 0,
+            "delta_diagnostic_last": self.pd_delta_diagnostic_last if self.use_pd_scheduler else 0,
+            "oom_event_count": self.pd_oom_event_count if self.use_pd_scheduler else 0,
+            # Parameter update overhead (cold path)
+            "param_update_count": self._param_update_count,
+            "last_param_update_us": self._last_param_update_us,
+            # THETA+ auto mode stats
+            "active_scheduler": (
+                self._active_scheduler
+                if self.scheduler_mode == "auto" else ""),
+            "n_obs": (
+                self._n_obs
+                if self.scheduler_mode == "auto" else 0),
+            "mode_switch_count": (
+                self._mode_switch_count
+                if self.scheduler_mode == "auto" else 0),
+        })
+
+    def save_schedule_stats(self, filepath: str = "schedule_stats.json") -> None:
+        """Save collected schedule statistics to a JSON file."""
+        import json
+        with open(filepath, "w") as f:
+            json.dump({
+                "stats": self._schedule_stats,
+                "summary": self.get_schedule_stats_summary(),
+                "n_update_history": self.pd_n_update_history if self.use_pd_scheduler else [],
+                "mode_switch_history": (
+                    self._mode_switch_history
+                    if self.scheduler_mode == "auto" else []),
+                "cfr_update_history": (
+                    self.pd_cfr_update_history
+                    if self.use_pd_scheduler else []),
+                "pd_config": {
+                    "k_mode": (self.pd_k_mode if self.use_pd_scheduler else ""),
+                    "scheduler_mode": self.scheduler_mode,
+                    "alpha_p": (self.pd_alpha_p if self.use_pd_scheduler else 0),
+                    "beta_p": (self.pd_beta_p if self.use_pd_scheduler else 0),
+                    "alpha_d": (self.pd_alpha_d if self.use_pd_scheduler else 0),
+                    "beta_d": (self.pd_beta_d if self.use_pd_scheduler else 0),
+                    "auto_compute_n": (self.pd_auto_compute_n
+                                        if self.use_pd_scheduler else False),
+                    "oom_tolerance": (self.pd_oom_tolerance
+                                        if self.use_pd_scheduler else 0),
+                    "max_num_seqs": int(self.max_num_running_reqs),
+                    "final_N": (int(self.pd_batch_size_N)
+                                 if self.use_pd_scheduler else 0),
+                    "final_k_star": (int(self.pd_switch_threshold_k)
+                                      if self.use_pd_scheduler else 0),
+                    "total_oom_events": (int(self.pd_oom_event_count)
+                                          if self.use_pd_scheduler else 0),
+                },
+            }, f, indent=2)
+        logger.info(f"[Schedule Stats] Saved {len(self._schedule_stats)} records to {filepath}")
+
+    def _save_stats_on_exit(self) -> None:
+        """Atexit handler to save stats when server shuts down."""
+        if self._schedule_stats:
+            self.save_schedule_stats(self._schedule_stats_file)
+
+    def get_schedule_stats_summary(self) -> dict:
+        """Get summary statistics from collected data."""
+        if not self._schedule_stats:
+            return {}
+
+        total_tokens = [s["total_tokens"] for s in self._schedule_stats]
+        prefill_tokens = [s["prefill_tokens"] for s in self._schedule_stats]
+        decode_tokens = [s["decode_tokens"] for s in self._schedule_stats]
+        elapsed_us = [s["elapsed_us"] for s in self._schedule_stats]
+        # Filter out the last entry (execution_time not yet measured) and zeros
+        execution_time_us = [s.get("execution_time_us", 0) for s in self._schedule_stats
+                            if s.get("execution_time_us", 0) > 0]
+        num_scheduled = [s["num_scheduled_reqs"] for s in self._schedule_stats]
+        num_preempted = [s.get("num_preempted_reqs", 0) for s in self._schedule_stats]
+        preempted_tokens = [s.get("preempted_tokens", 0) for s in self._schedule_stats]
+
+        def safe_mean(lst):
+            return sum(lst) / len(lst) if lst else 0
+
+        def safe_percentile(lst, p):
+            if not lst:
+                return 0
+            sorted_lst = sorted(lst)
+            idx = int(len(sorted_lst) * p / 100)
+            return sorted_lst[min(idx, len(sorted_lst) - 1)]
+
+        return {
+            "num_schedule_calls": len(self._schedule_stats),
+            "total_tokens": {
+                "sum": sum(total_tokens),
+                "mean": safe_mean(total_tokens),
+                "p50": safe_percentile(total_tokens, 50),
+                "p99": safe_percentile(total_tokens, 99),
+            },
+            "prefill_tokens": {
+                "sum": sum(prefill_tokens),
+                "mean": safe_mean(prefill_tokens),
+            },
+            "decode_tokens": {
+                "sum": sum(decode_tokens),
+                "mean": safe_mean(decode_tokens),
+            },
+            "schedule_time_us": {
+                "mean": safe_mean(elapsed_us),
+                "p50": safe_percentile(elapsed_us, 50),
+                "p99": safe_percentile(elapsed_us, 99),
+            },
+            "execution_time_us": {
+                "mean": safe_mean(execution_time_us),
+                "p50": safe_percentile(execution_time_us, 50),
+                "p99": safe_percentile(execution_time_us, 99),
+                "sum_ms": sum(execution_time_us) / 1000 if execution_time_us else 0,
+            },
+            "batch_size": {
+                "mean": safe_mean(num_scheduled),
+                "p50": safe_percentile(num_scheduled, 50),
+                "p99": safe_percentile(num_scheduled, 99),
+            },
+            "empty_schedules": sum(1 for t in total_tokens if t == 0),
+            "preemption": {
+                "total_preempted_reqs": sum(num_preempted),
+                "total_preempted_tokens": sum(preempted_tokens),
+                "schedules_with_preemption": sum(1 for n in num_preempted if n > 0),
+                "preemption_rate": sum(1 for n in num_preempted if n > 0) / len(num_preempted) if num_preempted else 0,
+            },
+            "n_updates": {
+                "total_updates": len(self.pd_n_update_history) if self.use_pd_scheduler else 0,
+                "by_reason": self._count_n_updates_by_reason() if self.use_pd_scheduler else {},
+            },
+            "param_update_overhead": {
+                "total_updates": self._param_update_count,
+                "total_time_us": self._param_update_total_us,
+                "mean_time_us": self._param_update_total_us / self._param_update_count if self._param_update_count > 0 else 0,
+            },
+        }
+
+    def _count_n_updates_by_reason(self) -> dict:
+        """Count N updates grouped by reason."""
+        counts: dict[str, int] = {}
+        for update in self.pd_n_update_history:
+            reason = update.get("reason", "unknown")
+            counts[reason] = counts.get(reason, 0) + 1
+        return counts
