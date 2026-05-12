@@ -54,15 +54,16 @@ detect_gpu_name() {
 # resolve_calibration <model>
 # ----------------------------------------------------------------------
 # Looks for, in order:
-#   $VLLM_PD_CALIBRATION_FILE                                       (override)
-#   outputs/pd_calibration_<MODEL_SHORT>_<GPU_TAG>.json      (per-GPU)
-#   outputs/pd_calibration_<MODEL_SHORT>.json                (legacy)
+#   $VLLM_PD_CALIBRATION_FILE                                          (override)
+#   reproduce/calibration/pd_calibration_<MODEL_SHORT>_<GPU_TAG>.json  (per-GPU)
+#   reproduce/calibration/pd_calibration_<MODEL_SHORT>.json            (legacy)
 # and exports VLLM_PD_CALIBRATION_FILE on success.
 resolve_calibration() {
     local model="$1"
     local model_short
     model_short=$(echo "$model" | sed 's|.*/||')
-    local outputs_dir="${SCRIPT_DIR}/../outputs"
+    # Locate reproduce/calibration/ via this file's own dir (independent of caller depth).
+    local outputs_dir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && cd ../calibration && pwd )"
 
     if [ -n "${VLLM_PD_CALIBRATION_FILE:-}" ] && [ -f "${VLLM_PD_CALIBRATION_FILE}" ]; then
         echo "[INFO] Using user-specified calibration: ${VLLM_PD_CALIBRATION_FILE}"
