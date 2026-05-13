@@ -1,6 +1,6 @@
 # eb-vllm
 
-**Threshold-Based Exclusive Batching for LLM Inference** — a vLLM extension that adaptively switches between exclusive batching (EB) and mixed batching (MB) to maximize throughput across bandwidth profiles.
+**EB⁺ — adaptive hybrid batching for LLM inference.** A vLLM v1 extension that online-selects between exclusive batching (EB) and mixed batching (MB) using a closed-form crossover condition, matching or exceeding vLLM v1 across every tested hardware × workload combination.
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Built on vLLM](https://img.shields.io/badge/Built%20on-vLLM%20v1-orange.svg)](https://github.com/vllm-project/vllm)
@@ -12,12 +12,12 @@
 
 ## 📋 What's in this repo
 
-<img src="assets/eb_vllm_header.png" width="900" alt="EB outperforms MB on bandwidth-constrained GPUs">
+<img src="assets/eb_vllm_header.png" width="900" alt="EB+ outperforms MB on bandwidth-constrained GPUs">
 
-Mixed batching (MB) — interleaving prefill and decode in the same iteration — is vLLM v1's default. We show that **whether MB or exclusive batching (EB) wins is governed by GPU memory bandwidth**, derive a **closed-form crossover condition**, and ship two new schedulers:
+Mixed batching (MB) — interleaving prefill and decode in the same iteration — is vLLM v1's default. We show that **whether MB or exclusive batching (EB) wins is governed by GPU memory bandwidth**, derive a **closed-form crossover condition**, and ship:
 
-* **EB(k̂\*)** — exclusive batching with an *asymptotically optimal*, online-calibrated phase-switching threshold k̂\* and memory-safe batch size N̂\*.
-* **EB⁺** — a hybrid scheduler that applies the crossover condition online to switch between EB and MB; **matches or exceeds v1 (MB) in every tested scenario (worst case: −0.4%).**
+* **🏆 EB⁺ (recommended)** — a hybrid scheduler that applies the crossover condition online to switch between EB and MB at every update tick. **Matches or exceeds v1 (MB) in every tested scenario (worst case: −0.4%)** and requires **no manual tuning**.
+* **EB(k̂\*)** — the underlying exclusive-batching component, with an *asymptotically optimal*, online-calibrated phase-switching threshold k̂\* and memory-safe batch size N̂\*. Available as a standalone scheduler when you've profiled your hardware as bandwidth-constrained.
 
 ### 📊 Headline results (Qwen3-8B, WildChat workload)
 
@@ -62,7 +62,24 @@ The new scheduler code lives in [`vllm/v1/core/sched/`](vllm/v1/core/sched/). Re
 
 ## 🚀 Quick start
 
-Run EB(k̂\*) — exclusive batching with online (k̂\*, N̂\*) controller:
+**Recommended — run EB⁺** (auto-selects between EB and MB based on the crossover diagnostic):
+
+```bash
+VLLM_USE_PD_SCHEDULER=1 \
+VLLM_PD_SCHEDULER_MODE=auto \
+VLLM_PD_K_MODE=cfr \
+VLLM_PD_AUTO_COMPUTE_N=1 \
+VLLM_PD_OOM_TOLERANCE=0.01 \
+VLLM_PD_CALIBRATION_FILE=reproduce/calibration/pd_calibration_Qwen3-8B_H200.json \
+vllm serve Qwen/Qwen3-8B --max-num-seqs 1024
+```
+
+This is what you should reach for by default. EB⁺ does the hardware-aware thing automatically; you don't need to know whether your GPU is bandwidth-constrained.
+
+<details>
+<summary><strong>Advanced — run pure EB(k̂*)</strong> (always exclusive batching, no MB fallback)</summary>
+
+If you've already profiled your hardware as memory-bandwidth-bound and want to skip the online crossover check, you can pin the scheduler to EB only:
 
 ```bash
 VLLM_USE_PD_SCHEDULER=1 \
@@ -73,32 +90,27 @@ VLLM_PD_CALIBRATION_FILE=reproduce/calibration/pd_calibration_Qwen3-8B_H200.json
 vllm serve Qwen/Qwen3-8B --max-num-seqs 1024
 ```
 
-Run EB⁺ — hybrid that auto-selects between EB and MB:
+The only difference from the EB⁺ command is the absence of `VLLM_PD_SCHEDULER_MODE=auto`. At low load this can underperform v1 (see the [EB⁺ section](#-eb-hybrid-wins-everywhere) above); use only if you understand the trade-off.
 
-```bash
-VLLM_USE_PD_SCHEDULER=1 \
-VLLM_PD_SCHEDULER_MODE=auto \
-VLLM_PD_K_MODE=cfr \
-VLLM_PD_AUTO_COMPUTE_N=1 \
-VLLM_PD_CALIBRATION_FILE=reproduce/calibration/pd_calibration_Qwen3-8B_H200.json \
-vllm serve Qwen/Qwen3-8B --max-num-seqs 1024
-```
+</details>
 
 `VLLM_PD_CALIBRATION_FILE` points to a per-(model, GPU) cost-model calibration JSON. We ship a sample for Qwen3-8B on H200; see [`reproduce/calibration/README.md`](reproduce/calibration/README.md) for how to generate one for your hardware (a few minutes of GPU time).
 
 ## ⚙️ How it works
 
-### Phase machine
+EB⁺ is a thin online controller wrapped around two batching modes (EB and MB). At every update tick it evaluates a single scalar — the crossover diagnostic $\Delta(N)$ — and routes to whichever mode the diagnostic predicts will win.
 
-Under EB, the scheduler never mixes prefill and decode. The batch oscillates between two phases, and the # of decoding requests in the batch follows a sawtooth between $N$ and $N - \hat{k}^*$:
+### Phase machine (when EB⁺ runs in EB mode)
+
+When the crossover favors exclusive batching, EB⁺ never mixes prefill and decode. The batch oscillates between two phases, and the # of decoding requests follows a sawtooth between $N$ and $N - \hat{k}^*$:
 
 <img src="assets/eb_phase_machine.png" width="900" alt="EB inventory dynamics: batch oscillates between N and N-k̂*">
 
 * **Phase 1 (Decode).** All $N$ active requests advance by one token each iteration. The scheduler counts completions; once the proportion of finished slots meets the closed-form ratio $\theta^* / (1 - \theta^*)$ — equivalently, $\hat{k}^*$ requests have completed — it triggers a switch.
-* **Phase 2 (Refill).** The scheduler prefills exactly $\hat{k}^*$ new requests into the vacated slots, then returns to decode with the batch refilled back to $N$. (Under EB⁺, this phase may instead remain in mixed batching when the crossover diagnostic $\Delta(N)$ favors MB.)
+* **Phase 2 (Refill).** The scheduler prefills exactly $\hat{k}^*$ new requests into the vacated slots, then returns to decode with the batch refilled back to $N$.
 * **Cold start.** Phase 0 (not shown) runs once on startup to populate the initial $N$ requests; afterwards the system stays in the Phase 1 ↔ Phase 2 cycle.
 
-This separation eliminates the prefill–decode bandwidth contention that limits MB on memory-bound GPUs.
+This separation eliminates the prefill–decode bandwidth contention that limits MB on memory-bound GPUs. When the diagnostic instead favors MB (high-bandwidth GPUs, very low load), EB⁺ stays in vLLM v1's mixed-batching path and skips the phase machine entirely.
 
 ### Closed-form ingredients
 
@@ -130,7 +142,7 @@ The README figures are generated by the scripts under [`assets/`](assets/) (`mak
 ```
 eb-vllm/
 ├── vllm/v1/core/sched/        # Our scheduler additions
-│   ├── scheduler.py           # EB scheduler + EB+ controller
+│   ├── scheduler.py           # EB+ controller + EB phase machine
 │   ├── calibration.py         # Online (k̂*, N̂*) cost-model estimation
 │   └── ...
 ├── reproduce/                 # Paper reproduction harness (per-section subdirs)
