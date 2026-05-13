@@ -17,11 +17,13 @@ plt.rcParams.update({
 })
 
 # (GPU, BW TB/s, EB+ Throughput gain %, EB+ TPOT reduction %)
+# Ordered from highest bandwidth (left) to lowest (right) so the bars
+# rise left-to-right, visualizing: as bandwidth shrinks, EB+ wins more.
 data = [
-    ("L40S",         0.864,  42.3, 27.5),
-    ("RTX PRO 6000", 1.792,  11.8, 34.2),
-    ("H200",         4.8,     2.2, 36.1),
     ("B300",         8.0,     0.0,  2.4),
+    ("H200",         4.8,     2.2, 36.1),
+    ("RTX PRO 6000", 1.792,  11.8, 34.2),
+    ("L40S",         0.864,  42.3, 27.5),
 ]
 
 fig, (axL, axR) = plt.subplots(1, 2, figsize=(13.5, 4.8), dpi=150)
@@ -71,12 +73,12 @@ axL.grid(axis="y", linestyle=":", alpha=0.4, zorder=0)
 axL.set_title("Throughput (higher is better for EB$^+$)",
               fontsize=12, fontweight="bold", pad=8)
 
-# Trend annotation
-axL.annotate("", xy=(3.18, -1), xytext=(0.65, 36),
+# Trend annotation — arrow rises from B300 (left, ≈0%) to L40S (right, +42%)
+axL.annotate("", xy=(3.18, 36), xytext=(0.05, 1),
              arrowprops=dict(arrowstyle="->", color="#444", lw=1.4,
                              connectionstyle="arc3,rad=-0.20"), zorder=2)
-axL.text(1.95, 25, "Bandwidth ↑\n→ EB$^+$ advantage shrinks",
-         fontsize=9.5, color="#333", style="italic", ha="center", va="center",
+axL.text(0.75, 32, "Bandwidth ↓\n→ EB$^+$ advantage grows",
+         fontsize=9.5, color="#333", style="italic", ha="left", va="center",
          bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
                    edgecolor="#888", alpha=0.95), zorder=3)
 
