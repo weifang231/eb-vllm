@@ -10,16 +10,39 @@ Fig. `validation_grid.pdf` (3 scenarios × 3 metrics).
 |---|---|
 | `run_validation_cfr.sh` | Fixed-k sweep + EB(k̂\*) + v1 on 3 synthetic CFR workloads |
 | `analyze_cfr_validation.py` | Aggregate bench JSONs into `validation_summary.csv` |
-| `plot_validation_grid.py` | 3×3 grid (scenario × metric); accepts the CSV or `--demo` |
+| `plot_validation_grid.py` | Render the 3×3 grid (renders from CSV or `--demo`) |
+| `plot_validation_grid_paper.py` | Re-render paper Figure 3 from extracted data (`paper_data/validation_grid.json`) |
+| `plot_validation_comparison.py` | Overlay paper Figure 3 + your reproduced values for side-by-side diff |
+| `paper_data/validation_grid.json` | Numerical data extracted from paper Figure 3 (for re-plotting + comparison) |
+
+## Important: matching paper Figure 3 exactly
+
+Paper Figure 3 caption: *"Validation on H200, N = 1024."* All three workloads
+were run at **fixed batch size N=1024 with `VLLM_PD_AUTO_COMPUTE_N=0`** (no
+memory-safe online shrinking).
+
+If you leave `VLLM_PD_AUTO_COMPUTE_N=1` (or the older script default), the
+CFR controller will aggressively shrink N̂\* (e.g. to ~315 on decode-heavy)
+to satisfy the ε=0.01 OOM bound; throughput then drops by ~2.4× relative
+to the paper figure. **This is not a regression in the EB algorithm** —
+it's the memory-safe Proposition\,memory bound being more conservative
+than what the paper figure used.
+
+`run_validation_cfr.sh` now defaults to `VLLM_PD_AUTO_COMPUTE_N=0`. To
+*exactly* match Figure 3 (same N across all three workloads), also set:
+
+```bash
+BS_DECODE_HEAVY=1024 BS_BALANCED=1024 BS_PREFILL_HEAVY=1024 \
+    MODEL=Qwen/Qwen3-8B ./run_validation_cfr.sh 8
+```
 
 ## Run
 
 ```bash
 MODEL=Qwen/Qwen3-8B ./run_validation_cfr.sh 8        # ~30 min on 8 GPUs
 python analyze_cfr_validation.py outputs/controller_validation/<GPU>_Qwen3-8B
-python plot_validation_grid.py \
-    outputs/controller_validation/<GPU>_Qwen3-8B/validation_summary.csv \
-    --output validation_grid.pdf
+python plot_validation_grid_paper.py                 # re-renders paper Fig. 3
+python plot_validation_comparison.py                 # overlays paper + reproduction
 ```
 
 `SKIP_EXISTING=1` (default) lets you re-run incrementally. See
@@ -28,5 +51,5 @@ python plot_validation_grid.py \
 ## Expected output
 
 3 rows (decode-heavy / balanced / prefill-heavy) × 3 columns (throughput,
-mean TPOT, p99 TPOT). Green points = fixed-k sweep with `k*` annotated,
+mean TPOT, p99 TPOT). Green points = fixed-k sweep with `k\*` annotated,
 red horizontal = v1, blue dashed = EB(k̂\*).

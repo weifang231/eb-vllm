@@ -40,6 +40,9 @@ BASE_PORT=${BASE_PORT:-10100}
 SKIP_EXISTING=${SKIP_EXISTING:-1}
 
 # Per-workload (B, N) defaults — tuned for Qwen3-8B but override freely.
+# Paper Figure 3 uses N=1024 uniformly across all three workloads (see caption
+# "Validation on H200, N = 1024"); to match it exactly, set
+#   BS_DECODE_HEAVY=BS_BALANCED=BS_PREFILL_HEAVY=1024.
 TB_DECODE_HEAVY=${TB_DECODE_HEAVY:-16384};  BS_DECODE_HEAVY=${BS_DECODE_HEAVY:-2048}
 TB_BALANCED=${TB_BALANCED:-14336};          BS_BALANCED=${BS_BALANCED:-1024}
 TB_PREFILL_HEAVY=${TB_PREFILL_HEAVY:-18432}; BS_PREFILL_HEAVY=${BS_PREFILL_HEAVY:-512}
@@ -49,7 +52,11 @@ export VLLM_PD_PARAM_UPDATE_INTERVAL=${VLLM_PD_PARAM_UPDATE_INTERVAL:-100}
 export VLLM_PD_IFR_UPDATE_INTERVAL=${VLLM_PD_IFR_UPDATE_INTERVAL:-100}
 export VLLM_PD_IFR_WINDOW_SIZE=${VLLM_PD_IFR_WINDOW_SIZE:-500}
 export VLLM_PD_IFR_MIN_SAMPLES=${VLLM_PD_IFR_MIN_SAMPLES:-50}
-export VLLM_PD_AUTO_COMPUTE_N=${VLLM_PD_AUTO_COMPUTE_N:-1}
+# Default to fixed N (no auto-shrink). Paper Figure 3 was generated at fixed
+# N=1024; the memory-safe auto-compute (Proposition prop:memory) is conservative
+# and yields significantly lower throughput than the figure suggests. Override
+# with VLLM_PD_AUTO_COMPUTE_N=1 to enable the memory-safe online controller.
+export VLLM_PD_AUTO_COMPUTE_N=${VLLM_PD_AUTO_COMPUTE_N:-0}
 export VLLM_PD_OOM_TOLERANCE=${VLLM_PD_OOM_TOLERANCE:-0.01}
 
 init_experiment_env
