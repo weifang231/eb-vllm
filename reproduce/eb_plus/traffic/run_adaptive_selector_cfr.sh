@@ -91,6 +91,7 @@ for scenario in $SCENARIOS; do
         decode_heavy)   tb=$TB_DECODE_HEAVY;   bs=$BS_DECODE_HEAVY ;;
         balanced)       tb=$TB_BALANCED;       bs=$BS_BALANCED ;;
         prefill_heavy)  tb=$TB_PREFILL_HEAVY;  bs=$BS_PREFILL_HEAVY ;;
+        table4)         tb=$TB_BALANCED;       bs=$BS_BALANCED ;;  # paper §4.4: μ_L=512, μ_O=256
     esac
     for sched in $SCHEDULERS; do
         echo "${sched}|${scenario}|${bs}|${tb}" >> "$QUEUE_FILE"

@@ -172,6 +172,9 @@ set_cfr_scenario() {
             INPUT_LEN=512;  OUTPUT_LEN=512 ;;
         prefill_heavy)
             INPUT_LEN=1024; OUTPUT_LEN=128 ;;
+        table4)
+            # Custom scenario matching paper Table 4: μ_L=512, μ_O=256.
+            INPUT_LEN=512;  OUTPUT_LEN=256 ;;
         *)
             echo "ERROR: Unknown scenario '$1'" >&2
             return 1 ;;
