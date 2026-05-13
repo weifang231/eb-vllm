@@ -1,103 +1,167 @@
-# eb-vllm: Exclusive Batching scheduler for vLLM
+# eb-vllm
 
-Code release for the ICML 2026 paper:
+**Threshold-Based Exclusive Batching for LLM Inference** — a vLLM extension that adaptively switches between exclusive batching (EB) and mixed batching (MB) to maximize throughput across bandwidth profiles.
 
-> **Threshold-Based Exclusive Batching for Memory-Bandwidth-Constrained LLM Inference**
-> Weifang Zhang*, Yuzhou Nie*, Bowen Pang, Guangrui Ma, Shining Wu
-> (\*equal contribution)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Built on vLLM](https://img.shields.io/badge/Built%20on-vLLM%20v1-orange.svg)](https://github.com/vllm-project/vllm)
+[![Paper](https://img.shields.io/badge/Paper-ICML%202026-red.svg)](#citation)
 
-This repository extends [vLLM](https://github.com/vllm-project/vllm) (at commit
-[`d1e1fb436`](https://github.com/vllm-project/vllm/commit/d1e1fb436), 2025-12-10)
-with the **EB (Exclusive Batching) scheduler family**:
+> Zhang, Nie, Pang, Ma, Wu. *Threshold-Based Exclusive Batching for Memory-Bandwidth-Constrained LLM Inference.* ICML 2026.
 
-- **EB(k̂\*)**: exclusive batching with online (k̂\*, N̂\*) calibration; the
-  phase-switching threshold k̂\* and memory-safe batch size N̂\* are updated
-  online from observed workload statistics.
-- **EB⁺**: adaptive selector that switches online between mixed batching
-  (vLLM v1's default) and EB based on a closed-form crossover criterion.
+---
 
-The new scheduler code lives in [`vllm/v1/core/sched/`](vllm/v1/core/sched/).
-Reproduction scripts for every figure and table in the paper live in
-[`reproduce/`](reproduce/).
+## 📋 What's in this repo
 
-## Installation
+<img src="assets/eb_vllm_header.png" width="900" alt="EB outperforms MB on bandwidth-constrained GPUs">
+
+Mixed batching (MB) — interleaving prefill and decode in the same iteration — is vLLM v1's default. We show that **whether MB or exclusive batching (EB) wins is governed by GPU memory bandwidth**, derive a **closed-form crossover condition**, and ship two new schedulers:
+
+* **EB(k̂\*)** — exclusive batching with an *asymptotically optimal*, online-calibrated phase-switching threshold k̂\* and memory-safe batch size N̂\*.
+* **EB⁺** — a hybrid scheduler that applies the crossover condition online to switch between EB and MB; **matches or exceeds v1 (MB) in every tested scenario (worst case: −0.4%).**
+
+### 📊 Headline results (Qwen3-8B, real workloads)
+
+| Hardware | Throughput vs v1 (MB) | TPOT vs v1 (MB) |
+|---|---|---|
+| L40S (0.864 TB/s) | EB(k̂\*) **+41.9%** | EB(k̂\*) **−27.2%** |
+| RTX PRO 6000 (1.792 TB/s) | EB(k̂\*) **+11.3%** (up to +15.3% on ShareGPT) | EB(k̂\*) **−34.7%** |
+| H200 (4.8 TB/s) | EB(k̂\*) ≈ v1 | EB(k̂\*) **−35.7%** on decode-heavy |
+| B300 (8.0 TB/s) | EB(k̂\*) −2.2% | EB(k̂\*) **−2.7%** |
+| Non-stationary traffic (RTX PRO 6000) | EB⁺ **+37.5%** (distribution shift) | EB⁺ **−43%** (distribution shift) |
+
+Source: paper §4.3 (real workloads), §4.4 (EB⁺), §4.5.1 (scalability across GPUs).
+
+---
+
+## 🏆 EB⁺: hybrid wins everywhere
+
+EB(k̂\*) alone is **highly effective on bandwidth-constrained GPUs and at high concurrency**, but it has a known weakness: at low concurrency, when there is not enough decode work to keep the phase-switching pipeline busy, EB pays a cold-start cost that MB does not. **EB⁺ fixes this by evaluating the closed-form crossover condition online and picking the better of {EB, MB} at every update tick.**
+
+<img src="assets/eb_plus_advantage.png" width="900" alt="EB+ never loses to v1; EB(k̂*) alone can lose at low load">
+
+The figure above evaluates two regimes:
+
+* **Traffic-level sensitivity** (paper Table 4). Concurrency sweep at μ\_L=512, μ\_O=256. EB(k̂\*) loses to v1 by 21–26% at c=32 because EB's fixed phase-switch overhead is not amortized over enough decode work. EB⁺ detects this regime and stays in MB, recovering v1's throughput to within 0.4%. At c=2048, EB⁺ commits to EB and gains 38% over v1 on RTX PRO 6000.
+* **Non-stationary workloads** (paper Table 5). Under sudden distribution shifts (μ\_L:1024→512→128, μ\_O:128→512→1024) or concurrency shifts (c:32→512→1024→256→2048), EB⁺ adapts online and **wins in all 4 (hardware × scenario) cells**, including +37.5% on RTX PRO 6000 under distribution shift.
+
+EB⁺ requires **no manual tuning**: the cost-model parameters (α\_p, α\_d, β\_p, β\_d, α\_MB, β\_MB\^e) are calibrated once per (model, GPU) in minutes; runtime updates are pure integer arithmetic.
+
+---
+
+## 📦 Installation
 
 ```bash
 git clone https://github.com/weifang231/eb-vllm.git
 cd eb-vllm
-# Use uv or pip; same install flow as upstream vLLM
-pip install -e .
+pip install -e .            # Same install flow as upstream vLLM
 ```
 
-Pinning to the camera-ready state:
+The new scheduler code lives in [`vllm/v1/core/sched/`](vllm/v1/core/sched/). Reproduction scripts in [`reproduce/`](reproduce/).
+
+## 🚀 Quick start
+
+Run EB(k̂\*) — exclusive batching with online (k̂\*, N̂\*) controller:
 
 ```bash
-git checkout icml2026-camera-ready    # tag at the paper-time snapshot
+VLLM_USE_PD_SCHEDULER=1 \
+VLLM_PD_K_MODE=cfr \
+VLLM_PD_AUTO_COMPUTE_N=1 \
+VLLM_PD_OOM_TOLERANCE=0.01 \
+VLLM_PD_CALIBRATION_FILE=reproduce/calibration/pd_calibration_Qwen3-8B_H200.json \
+vllm serve Qwen/Qwen3-8B --max-num-seqs 1024
 ```
 
-The `main` branch tracks subsequent fixes and improvements. For exact
-paper-faithful reproduction, use the tag.
-
-## Reproducing the paper
-
-See [`reproduce/README.md`](reproduce/README.md) for the per-section map of
-scripts and a step-by-step replication recipe.
-
-Quickstart:
+Run EB⁺ — hybrid that auto-selects between EB and MB:
 
 ```bash
-cd reproduce/synthetic_e2e
-./run_grid_search_cfr.sh 4               # 4 GPUs, ~2 h for Qwen3-8B
-python analyze_cfr_e2e.py outputs/e2e_grid_search/<GPU>_Qwen3-8B
-python plot_synthetic_e2e.py             # produces the §4.3.1 figure
+VLLM_USE_PD_SCHEDULER=1 \
+VLLM_PD_SCHEDULER_MODE=auto \
+VLLM_PD_K_MODE=cfr \
+VLLM_PD_AUTO_COMPUTE_N=1 \
+VLLM_PD_CALIBRATION_FILE=reproduce/calibration/pd_calibration_Qwen3-8B_H200.json \
+vllm serve Qwen/Qwen3-8B --max-num-seqs 1024
 ```
 
-## Repository layout
+`VLLM_PD_CALIBRATION_FILE` points to a per-(model, GPU) cost-model calibration JSON. We ship a sample for Qwen3-8B on H200; see [`reproduce/calibration/README.md`](reproduce/calibration/README.md) for how to generate one for your hardware (a few minutes of GPU time).
+
+## ⚙️ How it works
+
+### Phase machine
+
+Under EB, the scheduler never mixes prefill and decode. It cycles between three phases:
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> P0
+    P0: Phase 0\nInitial Prefill\n(fill N requests)
+    P1: Phase 1\nDecode\n(advance all N requests by 1 token)
+    P2: Phase 2\nRefill Prefill\n(admit k̂* new requests)
+
+    P0 --> P1 : N requests prefilled
+    P1 --> P2 : k̂* requests completed\n(θ*/(1−θ*) ratio met)
+    P2 --> P1 : k̂* new requests prefilled
+```
+
+* **Phase 0** runs at cold start to fill the batch.
+* **Phase 1** keeps decoding all N requests; the scheduler counts completions and triggers a switch as soon as the proportion of finished slots meets the closed-form ratio θ\*/(1−θ\*).
+* **Phase 2** prefills exactly enough new requests to refill the freed slots, then yields back to decode. (EB⁺ may instead remain in mixed batching here when the crossover diagnostic Δ(N) favors MB.)
+
+This separation eliminates the prefill–decode bandwidth contention that limits MB on memory-bound GPUs.
+
+### Closed-form ingredients
+
+Three closed-form derivations from the paper drive the controller:
+
+1. **Phase-switching threshold (Prop. 1, Thm. 2):** k\*/N converges to a closed-form root of θ/(1−θ) + ln(1−θ) = p₀α\_p/α\_d, with an O(η) correction for hazard-rate slope. Solved by bisection in `_compute_optimal_ratio` / `_compute_optimal_ratio_ifr`.
+2. **Memory-safe batch size (Prop. 3):** N̂\* satisfies a CLT-type concentration $N\cdot D(\theta) + \sigma(\theta)\sqrt{N\ln(1/\epsilon)} \le C$, ensuring OOM probability ≤ ε. Solved in closed form in `_compute_memory_safe_n`.
+3. **EB–MB crossover (Prop. 4):** the sign of a single scalar Δ(N) determines which strategy wins; computed in `_compute_diagnostic_delta`.
+
+The full online controller (`_update_params_online`) runs in two paths: a **hot path** (per-request, pure integer arithmetic) and a **cold path** (every M completions, computes EMA / hazard-rate fit / θ\* update). See [`vllm/v1/core/sched/scheduler.py`](vllm/v1/core/sched/scheduler.py) for the implementation.
+
+## 🧪 Reproducing the paper
+
+See [`reproduce/REPRODUCTION_REPORT.md`](reproduce/REPRODUCTION_REPORT.md) for the per-figure status table (✅ / ⚠️ / ⛔) and exact commands.
+
+| Paper section | Subdirectory |
+|---|---|
+| §4.2 Controller validation (Fig. 3) | [`reproduce/validation/`](reproduce/validation/) |
+| §4.3.1 Synthetic e2e (Fig. 4) | [`reproduce/synthetic_e2e/`](reproduce/synthetic_e2e/) |
+| §4.3.2 Real workloads (Tables 2–3, Figs. 5–6) | [`reproduce/real_workloads/`](reproduce/real_workloads/) |
+| §4.4 EB⁺ traffic-level (Table 4) | [`reproduce/eb_plus/traffic/`](reproduce/eb_plus/traffic/) |
+| §4.4 EB⁺ non-stationary (Table 5) | [`reproduce/eb_plus/non_stationary/`](reproduce/eb_plus/non_stationary/) |
+| §4.5 Cross-GPU / cross-model (Table 6, Fig. 7) | [`reproduce/scalability/`](reproduce/scalability/) |
+
+The README figures are generated by [`assets/make_header_figure.py`](assets/make_header_figure.py) and [`assets/make_eb_plus_figure.py`](assets/make_eb_plus_figure.py).
+
+## 📁 Repository layout
 
 ```
 eb-vllm/
-├── vllm/                              # vLLM package (upstream + EB scheduler)
-│   └── v1/core/sched/                 # our scheduler additions
-│       ├── calibration.py             # online (k̂*, N̂*) cost-model estimation
-│       ├── calibration_full_iter.py
-│       ├── scheduler.py               # EB scheduler + EB+ controller
-│       ├── async_scheduler.py
-│       ├── interface.py / output.py / request_queue.py / utils.py
-│       └── __init__.py
-├── reproduce/                         # paper reproduction harness
-│   ├── README.md                      # paper section → subdir mapping
-│   ├── REPRODUCE.md                   # recommended run order
-│   ├── common/   calibration/  docker/
-│   ├── cost_model/
-│   ├── hazard_rate/
-│   ├── validation/
-│   ├── synthetic_e2e/
-│   ├── real_workloads/
-│   ├── eb_plus/
-│   ├── disagg/
-│   ├── long_context/
-│   └── scalability/
-└── ...upstream vLLM files (CMakeLists, csrc/, tests/, docs/, ...)
+├── vllm/v1/core/sched/        # Our scheduler additions
+│   ├── scheduler.py           # EB scheduler + EB+ controller
+│   ├── calibration.py         # Online (k̂*, N̂*) cost-model estimation
+│   └── ...
+├── reproduce/                 # Paper reproduction harness (per-section subdirs)
+├── assets/                    # README figures and helper scripts
+└── ...                        # Upstream vLLM files (CMakeLists, csrc/, tests/, ...)
 ```
 
-## Citation
+## 📝 Citation
 
 ```bibtex
-@inproceedings{zhang2026theta,
-  title  = {Threshold-Based Exclusive Batching for Memory-Bandwidth-Constrained
-            LLM Inference},
-  author = {Zhang, Weifang and Nie, Yuzhou and Pang, Bowen and
-            Ma, Guangrui and Wu, Shining},
+@inproceedings{zhang2026eb,
+  title     = {Threshold-Based Exclusive Batching for Memory-Bandwidth-Constrained LLM Inference},
+  author    = {Zhang, Weifang and Nie, Yuzhou and Pang, Bowen and Ma, Guangrui and Wu, Shining},
   booktitle = {Proceedings of the 43rd International Conference on Machine Learning},
-  year   = {2026}
+  year      = {2026}
 }
 ```
 
-## License
+## ⚖️ License
 
 Apache-2.0, inherited from upstream vLLM. See [`LICENSE`](LICENSE).
 
-## Acknowledgement
+## 🙏 Acknowledgement
 
-This work builds on [vLLM](https://github.com/vllm-project/vllm) by the vLLM
-team. We thank the vLLM community for the foundational serving infrastructure.
+Built on [vLLM](https://github.com/vllm-project/vllm). We thank the vLLM community for the foundational serving infrastructure.
