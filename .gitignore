@@ -227,3 +227,29 @@ ep_kernels_workspace/
 
 # Allow tracked library source folders under submodules (e.g., benchmarks/lib)
 !vllm/benchmarks/lib/
+
+# Reproduction experiment outputs (multi-GB; never commit)
+reproduce/outputs/
+reproduce/**/outputs/
+reproduce/**/logs/
+
+# Benchmark result JSONs scattered under reproduce/
+reproduce/**/bench_*.json
+reproduce/**/*_stats.json
+reproduce/**/experiment_config.json
+reproduce/**/experiment_config_v2.json
+reproduce/**/validation_summary.csv
+reproduce/**/selector_summary.csv
+reproduce/**/optimal_per_scheduler.csv
+reproduce/**/progress.txt
+reproduce/**/experiment_queue.txt
+
+# Auto-generated paper figures (re-rendered from scripts; commit the source)
+reproduce/**/fig_*.pdf
+reproduce/**/fig_*.png
+reproduce/**/*_reproduced.pdf
+reproduce/**/*_comparison.pdf
+
+# Calibration JSONs: tiny (~500 bytes) and reference values are committed;
+# new ones (generated locally per (model, GPU)) are tracked too if you want
+# them shared. Override per-file with .gitignore if needed.

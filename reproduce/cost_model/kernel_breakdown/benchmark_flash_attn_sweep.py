@@ -1,10 +1,10 @@
 """
 FlashAttention Comprehensive Sweep Benchmark
 
-测试不同场景下 kernel time 随 token 数增长的斜率：
-1. Pure Prefill: 不同 prefill 长度 (128, 256, 512, 1024, 2048)
-2. Pure Decode: 不同 context 长度 (128, 256, 512, 1024, 2048)
-3. Mixed (10%, 20%, 40%, 80%): 不同总 token 数
+Measures the slope of kernel time vs. token count under different scenarios:
+1. Pure Prefill: varying prefill lengths (128, 256, 512, 1024, 2048)
+2. Pure Decode: varying context lengths (128, 256, 512, 1024, 2048)
+3. Mixed (10%, 20%, 40%, 80%): varying total token counts
 
 Usage:
     python reproduce/cost_model/kernel_breakdown/benchmark_flash_attn_sweep.py \
@@ -31,7 +31,7 @@ def create_attention_inputs(
     device: str = "cuda",
     dtype: torch.dtype = torch.float16,
 ) -> Tuple[torch.Tensor, ...]:
-    """创建 FlashAttention 的输入张量"""
+    """Create input tensors for FlashAttention."""
 
     total_tokens = sum(query_lens)
     max_context = max(context_lens)
@@ -69,7 +69,7 @@ def benchmark_single(
     warmup: int = 5,
     repeat: int = 50,
 ) -> float:
-    """运行单次 benchmark，返回平均时间 (ms)"""
+    """Run a single benchmark; return average time (ms)."""
 
     from vllm.vllm_flash_attn import flash_attn_varlen_func
 
@@ -123,15 +123,15 @@ def benchmark_single(
 
 
 def run_sweep(args) -> Dict:
-    """运行完整的 sweep 测试"""
+    """Run a full sweep test."""
 
     results = {
-        "pure_prefill": [],    # 纯 prefill，不同长度
-        "pure_decode": [],     # 纯 decode，不同 context 长度
-        "mixed": {}            # 不同 prefill 比例
+        "pure_prefill": [],    # pure prefill, varying lengths
+        "pure_decode": [],     # pure decode, varying context lengths
+        "mixed": {}            # varying prefill ratios
     }
 
-    # 测试的长度序列
+    # Length sequence under test
     seq_lengths = [128, 256, 512, 1024, 2048]
     prefill_percentages = [10, 20, 40, 80]
 
@@ -146,10 +146,10 @@ def run_sweep(args) -> Dict:
     print(f"{'='*60}")
 
     for seq_len in seq_lengths:
-        # 保持总 token 数合理：1 个 prefill 序列
+        # Keep the total token count reasonable: 1 prefill sequence
         num_seqs = 1
         query_lens = [seq_len] * num_seqs
-        context_lens = [seq_len] * num_seqs  # prefill 时 context = query
+        context_lens = [seq_len] * num_seqs  # for prefill, context == query
 
         time_ms = benchmark_single(
             query_lens, context_lens,
@@ -171,7 +171,7 @@ def run_sweep(args) -> Dict:
     print(f"{'='*60}")
 
     for context_len in seq_lengths:
-        # Pure decode: 每个序列 query_len=1，但 context 不同
+        # Pure decode: each sequence has query_len=1 but different context
         query_lens = [1] * args.batch_size
         context_lens = [context_len] * args.batch_size
 
@@ -189,7 +189,7 @@ def run_sweep(args) -> Dict:
         })
         print(f"  context_len={context_len:4d}: {time_ms:.3f} ms")
 
-    # ========== 3. Mixed Sweep (不同比例 x 不同总 token) ==========
+    # ========== 3. Mixed Sweep (varying ratios x varying total tokens) ==========
     print(f"\n{'='*60}")
     print("3. MIXED SWEEP (varying prefill % x total tokens)")
     print(f"{'='*60}")
@@ -199,13 +199,13 @@ def run_sweep(args) -> Dict:
         print(f"\n  --- {pct}% Prefill ---")
 
         for prefill_len in seq_lengths:
-            # 计算 batch 组成
+            # Compute batch composition
             num_prefill = max(1, args.batch_size * pct // 100)
             num_decode = args.batch_size - num_prefill
 
-            # Prefill 序列用 prefill_len，decode 序列用 1
+            # Prefill sequences use prefill_len, decode sequences use 1
             query_lens = [prefill_len] * num_prefill + [1] * num_decode
-            # Context: prefill 用 prefill_len，decode 也用 prefill_len (假设已生成同样长度)
+            # Context: prefill uses prefill_len, decode also uses prefill_len (assume same length)
             context_lens = [prefill_len] * args.batch_size
 
             total_query_tokens = prefill_len * num_prefill + num_decode
@@ -230,10 +230,10 @@ def run_sweep(args) -> Dict:
 
 
 def calculate_slopes(results: Dict) -> Dict:
-    """计算各场景的斜率"""
+    """Compute slopes for each scenario."""
     slopes = {}
 
-    # Pure Prefill 斜率
+    # Pure Prefill slope
     prefill_data = results["pure_prefill"]
     if len(prefill_data) >= 2:
         x = np.array([d["seq_len"] for d in prefill_data])
@@ -244,7 +244,7 @@ def calculate_slopes(results: Dict) -> Dict:
             "intercept_ms": intercept,
         }
 
-    # Pure Decode 斜率
+    # Pure Decode slope
     decode_data = results["pure_decode"]
     if len(decode_data) >= 2:
         x = np.array([d["context_len"] for d in decode_data])
@@ -255,7 +255,7 @@ def calculate_slopes(results: Dict) -> Dict:
             "intercept_ms": intercept,
         }
 
-    # Mixed 斜率 (每个比例)
+    # Mixed slopes (per ratio)
     slopes["mixed"] = {}
     for pct_key, mixed_data in results["mixed"].items():
         if len(mixed_data) >= 2:
@@ -271,13 +271,13 @@ def calculate_slopes(results: Dict) -> Dict:
 
 
 def plot_sweep_results(results: Dict, slopes: Dict, output_path: str, gpu_name: str):
-    """绘制 sweep 结果的多线折线图"""
+    """Plot sweep results as a multi-line chart."""
 
     fig, axes = plt.subplots(1, 2, figsize=(18, 6))
 
     colors = plt.cm.tab10(np.linspace(0, 1, 10))
 
-    # ========== 图1: 所有场景的 Time vs Seq Length ==========
+    # ========== Fig 1: Time vs Seq Length, all scenarios ==========
     ax1 = axes[0]
 
     # Pure Prefill
@@ -311,12 +311,12 @@ def plot_sweep_results(results: Dict, slopes: Dict, output_path: str, gpu_name: 
     ax1.grid(True, alpha=0.3)
     ax1.set_xscale('linear')
 
-    # ========== 图2: 斜率对比柱状图 ==========
+    # ========== Fig 2: slope bar comparison ==========
     ax2 = axes[1]
 
     labels = ['Pure\nPrefill', 'Pure\nDecode']
     slope_values = [
-        slopes["pure_prefill"]["slope_ms_per_token"] * 1000,  # 转换为 μs
+        slopes["pure_prefill"]["slope_ms_per_token"] * 1000,  # convert to us
         slopes["pure_decode"]["slope_ms_per_context"] * 1000,
     ]
     bar_colors = [colors[0], colors[1]]
@@ -329,7 +329,7 @@ def plot_sweep_results(results: Dict, slopes: Dict, output_path: str, gpu_name: 
     x_pos = np.arange(len(labels))
     bars = ax2.bar(x_pos, slope_values, color=bar_colors, edgecolor='black', linewidth=1.2)
 
-    # 在柱子上标注数值
+    # Annotate bar values
     for bar, val in zip(bars, slope_values):
         ax2.annotate(f'{val:.3f}', (bar.get_x() + bar.get_width()/2, bar.get_height()),
                     ha='center', va='bottom', fontsize=10, fontweight='bold')
@@ -350,16 +350,16 @@ def plot_comparison_bar(json_file1: str, json_file2: str,
                         gpu_name1: str, gpu_name2: str,
                         output_path: str):
     """
-    绘制两个GPU的对比柱状图
+    Plot a side-by-side bar chart comparing two GPUs.
 
     Args:
-        json_file1: 第一个GPU的结果JSON文件路径
-        json_file2: 第二个GPU的结果JSON文件路径
-        gpu_name1: 第一个GPU的名称 (e.g., "H200")
-        gpu_name2: 第二个GPU的名称 (e.g., "A6000")
-        output_path: 输出图片路径
+        json_file1: result JSON path for the first GPU
+        json_file2: result JSON path for the second GPU
+        gpu_name1: name of the first GPU (e.g., "H200")
+        gpu_name2: name of the second GPU (e.g., "A6000")
+        output_path: output image path
     """
-    # 读取两个JSON文件
+    # Load both JSON files
     with open(json_file1, 'r') as f:
         data1 = json.load(f)
     with open(json_file2, 'r') as f:
@@ -368,7 +368,7 @@ def plot_comparison_bar(json_file1: str, json_file2: str,
     slopes1 = data1["slopes"]
     slopes2 = data2["slopes"]
 
-    # 构建标签和数据
+    # Build labels and data
     labels = ['Pure\nPrefill', 'Pure\nDecode']
     values1 = [
         slopes1["pure_prefill"]["slope_ms_per_token"] * 1000,  # μs
@@ -379,28 +379,28 @@ def plot_comparison_bar(json_file1: str, json_file2: str,
         slopes2["pure_decode"]["slope_ms_per_context"] * 1000,
     ]
 
-    # 添加 Mixed 场景
+    # Add Mixed scenarios
     for pct_key in slopes1["mixed"].keys():
         labels.append(f'Mixed\n{pct_key}')
         values1.append(slopes1["mixed"][pct_key]["slope_ms_per_prefill_len"] * 1000)
         values2.append(slopes2["mixed"][pct_key]["slope_ms_per_prefill_len"] * 1000)
 
-    # 绘图
+    # Plot
     fig, ax = plt.subplots(figsize=(16, 6))
 
     x = np.arange(len(labels))
-    width = 0.35  # 柱子宽度
+    width = 0.35  # bar width
 
-    # 使用两种颜色
-    color1 = '#2E86AB'  # 深蓝色 for H200
-    color2 = '#E94F37'  # 红色 for A6000
+    # Use two colors
+    color1 = '#2E86AB'  # dark blue for H200
+    color2 = '#E94F37'  # red for A6000
 
     bars1 = ax.bar(x - width/2, values1, width, label=gpu_name1,
                    color=color1, edgecolor='black', linewidth=1.2)
     bars2 = ax.bar(x + width/2, values2, width, label=gpu_name2,
                    color=color2, edgecolor='black', linewidth=1.2)
 
-    # 在柱子上标注数值
+    # Annotate bar values
     def add_labels(bars):
         for bar in bars:
             height = bar.get_height()
@@ -413,7 +413,7 @@ def plot_comparison_bar(json_file1: str, json_file2: str,
     add_labels(bars1)
     add_labels(bars2)
 
-    # 设置坐标轴
+    # Configure axes
     ax.set_xlabel('Scenario', fontsize=20)
     ax.set_ylabel('Slope (μs per unit length increase)', fontsize=20)
     ax.set_xticks(x)
@@ -422,7 +422,7 @@ def plot_comparison_bar(json_file1: str, json_file2: str,
     ax.legend(fontsize=30, loc='upper left')
     ax.grid(True, alpha=0.3, axis='y')
 
-    # 设置y轴从0开始
+    # Start y-axis from 0
     ax.set_ylim(bottom=0)
 
     plt.tight_layout()
@@ -432,7 +432,7 @@ def plot_comparison_bar(json_file1: str, json_file2: str,
 
 
 def print_slope_summary(slopes: Dict):
-    """打印斜率摘要"""
+    """Print slope summary."""
     print(f"\n{'='*70}")
     print("SLOPE SUMMARY (μs per unit increase)")
     print(f"{'='*70}")
@@ -449,7 +449,7 @@ def print_slope_summary(slopes: Dict):
 def main():
     parser = argparse.ArgumentParser(description="FlashAttention Comprehensive Sweep Benchmark")
 
-    # 比较模式参数
+    # Comparison-mode parameters
     parser.add_argument("--compare", action="store_true",
                        help="Compare two GPU results (requires --json1, --json2)")
     parser.add_argument("--json1", type=str, default=None,
@@ -463,7 +463,7 @@ def main():
     parser.add_argument("--compare-output", type=str, default="comparison.pdf",
                        help="Output path for comparison plot")
 
-    # Benchmark 参数
+    # Benchmark parameters
     parser.add_argument("--batch-size", type=int, default=512,
                        help="Batch size for decode/mixed scenarios")
     parser.add_argument("--num-heads", type=int, default=32,
@@ -476,7 +476,7 @@ def main():
                        help="Output JSON file path")
     args = parser.parse_args()
 
-    # 比较模式
+    # Comparison mode
     if args.compare:
         if not args.json1 or not args.json2:
             parser.error("--compare requires --json1 and --json2")
@@ -489,16 +489,16 @@ def main():
         )
         return
 
-    # 运行 sweep
+    # Run sweep
     results = run_sweep(args)
 
-    # 计算斜率
+    # Compute slope
     slopes = calculate_slopes(results)
 
-    # 打印斜率摘要
+    # Print slope summary
     print_slope_summary(slopes)
 
-    # 保存结果
+    # Save results
     gpu_name = torch.cuda.get_device_name()
     if args.output:
         output_data = {
@@ -512,7 +512,7 @@ def main():
             json.dump(output_data, f, indent=2)
         print(f"\nResults saved to {args.output}")
 
-        # 生成图表
+        # Generate plots
         plot_path = args.output.replace('.json', '.png')
         plot_sweep_results(results, slopes, plot_path, gpu_name)
 

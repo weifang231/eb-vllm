@@ -39,10 +39,10 @@ RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0.5}
 BASE_PORT=${BASE_PORT:-10100}
 SKIP_EXISTING=${SKIP_EXISTING:-1}
 
-# Per-workload (B, N) defaults — tuned for Qwen3-8B but override freely.
-# Paper Figure 3 uses N=1024 uniformly across all three workloads (see caption
-# "Validation on H200, N = 1024"); to match it exactly, set
-#   BS_DECODE_HEAVY=BS_BALANCED=BS_PREFILL_HEAVY=1024.
+# Per-workload (B, N) defaults — tuned for Qwen3-8B; override via env vars.
+# These BS values are the *initial* max-num-seqs caps; with auto-N enabled
+# below, the online controller dynamically shrinks N̂* ≤ BS as needed to
+# satisfy the OOM-tolerance constraint (Proposition prop:memory).
 TB_DECODE_HEAVY=${TB_DECODE_HEAVY:-16384};  BS_DECODE_HEAVY=${BS_DECODE_HEAVY:-2048}
 TB_BALANCED=${TB_BALANCED:-14336};          BS_BALANCED=${BS_BALANCED:-1024}
 TB_PREFILL_HEAVY=${TB_PREFILL_HEAVY:-18432}; BS_PREFILL_HEAVY=${BS_PREFILL_HEAVY:-512}
@@ -52,11 +52,14 @@ export VLLM_PD_PARAM_UPDATE_INTERVAL=${VLLM_PD_PARAM_UPDATE_INTERVAL:-100}
 export VLLM_PD_IFR_UPDATE_INTERVAL=${VLLM_PD_IFR_UPDATE_INTERVAL:-100}
 export VLLM_PD_IFR_WINDOW_SIZE=${VLLM_PD_IFR_WINDOW_SIZE:-500}
 export VLLM_PD_IFR_MIN_SAMPLES=${VLLM_PD_IFR_MIN_SAMPLES:-50}
-# Default to fixed N (no auto-shrink). Paper Figure 3 was generated at fixed
-# N=1024; the memory-safe auto-compute (Proposition prop:memory) is conservative
-# and yields significantly lower throughput than the figure suggests. Override
-# with VLLM_PD_AUTO_COMPUTE_N=1 to enable the memory-safe online controller.
-export VLLM_PD_AUTO_COMPUTE_N=${VLLM_PD_AUTO_COMPUTE_N:-0}
+# Memory-safe online controller (Proposition prop:memory) is ENABLED by
+# default to match the paper's actual experimental setup: EB(k̂*) figures
+# (e.g. Fig. fig:validation) were produced with VLLM_PD_AUTO_COMPUTE_N=1,
+# with the BS values above acting as upper caps on the dynamically-computed
+# N̂*. The paper caption "N=1024" refers to the v1 baseline / fixed-k sweep;
+# EB(k̂*) uses the effective batch size min(N̂*, BS). Set =0 to disable
+# auto-shrink and force fixed N=BS for all schedulers.
+export VLLM_PD_AUTO_COMPUTE_N=${VLLM_PD_AUTO_COMPUTE_N:-1}
 export VLLM_PD_OOM_TOLERANCE=${VLLM_PD_OOM_TOLERANCE:-0.01}
 
 init_experiment_env

@@ -45,7 +45,7 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=str,
-        default="/scratch/yuzhou/aproj/vllm/pd_exp/outputs/fig_synthetic_e2e.pdf",
+        default="fig_synthetic_e2e.pdf",
         help="Output PDF path.",
     )
     parser.add_argument(

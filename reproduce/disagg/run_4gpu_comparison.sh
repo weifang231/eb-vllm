@@ -1,18 +1,18 @@
 #!/bin/bash
 
-# 4-GPU 对比: CP(DP=4) vs THETA+(DP=4) vs Disagg(1P+3D, 2P+2D, 3P+1D)
+# 4-GPU comparison: CP(DP=4) vs THETA+(DP=4) vs Disagg(1P+3D, 2P+2D, 3P+1D)
 #
-# 用法: ./run_4gpu_comparison.sh [GPU1] [GPU2] [GPU3] [GPU4]
+# Usage: ./run_4gpu_comparison.sh [GPU1] [GPU2] [GPU3] [GPU4]
 #
-# 环境变量:
-#   MODEL: 模型路径，默认 Qwen/Qwen3-8B
-#   MAX_CONCURRENCY: 并发数，默认 512
-#   NUM_PROMPTS: 请求数，默认 4000
-#   INPUT_LEN / OUTPUT_LEN: input/output 长度
-#   SKIP_DISAGG: 设为1跳过所有disagg
-#   DISAGG_BASE_PORT: disagg 端口基数，默认 9000 (proxy=BASE, prefill=BASE+100+i, decode=BASE+200+i)
+# Environment variables:
+#   MODEL: model path, default Qwen/Qwen3-8B
+#   MAX_CONCURRENCY: concurrency, default 512
+#   NUM_PROMPTS: number of requests, default 4000
+#   INPUT_LEN / OUTPUT_LEN: input/output length
+#   SKIP_DISAGG: set to 1 to skip all disagg
+#   DISAGG_BASE_PORT: disagg port base, default 9000 (proxy=BASE, prefill=BASE+100+i, decode=BASE+200+i)
 
-set +e  # 不因单个实验失败退出，由调用方处理
+set +e  # Don't abort on a single failure; the caller handles it.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../common/common.sh"
@@ -44,11 +44,11 @@ mkdir -p "$OUTPUT_DIR/logs"
 
 init_experiment_env
 
-# 硬件校准
+# Hardware calibration
 ensure_calibration "$MODEL" "$MODEL_SHORT"
 
 echo "========================================"
-echo "4-GPU 对比 (concurrency=${MAX_CONCURRENCY})"
+echo "4-GPU comparison (concurrency=${MAX_CONCURRENCY})"
 echo "========================================"
 echo "  MODEL: $MODEL"
 echo "  GPUs: $ALL_GPUS"
@@ -57,7 +57,7 @@ echo "  INPUT_LEN: $INPUT_LEN, OUTPUT_LEN: $OUTPUT_LEN"
 echo ""
 
 # ========================================
-# 生成数据集
+# Generate dataset
 # ========================================
 DATASET="${OUTPUT_DIR}/synthetic.jsonl"
 python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
@@ -69,7 +69,7 @@ python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
     --output "$DATASET" \
     --seed 42
 
-# 公共 bench 参数
+# Common bench params
 bench_common=(
     --model "$MODEL"
     --dataset-name custom
@@ -90,7 +90,7 @@ if [ -n "${DTYPE:-}" ]; then
 fi
 
 # ========================================
-# DP=4 辅助函数
+# DP=4 helper functions
 # ========================================
 run_dp4_bench() {
     local scheduler=$1
@@ -118,7 +118,7 @@ run_dp4_bench() {
     local pid=$!
 
     if ! wait_for_server $PORT $pid 300 "$log_file"; then
-        echo "${scheduler} 启动失败"
+        echo "${scheduler} failed to start"
         kill_server $pid
         return 1
     fi
@@ -131,12 +131,12 @@ run_dp4_bench() {
 
     kill $pid 2>/dev/null; wait $pid 2>/dev/null
 
-    [ $status -eq 0 ] && echo "${scheduler} 完成" || echo "${scheduler} 失败 (exit=$status)"
+    [ $status -eq 0 ] && echo "${scheduler} done" || echo "${scheduler} failed (exit=$status)"
     return $status
 }
 
 # ========================================
-# Disagg 辅助函数 (NP + MD)
+# Disagg helpers (NP + MD)
 # ========================================
 run_disagg_bench() {
     local n_prefill=$1
@@ -148,11 +148,11 @@ run_disagg_bench() {
     echo ""
     echo "--- disagg (${config_name}) ---"
 
-    # 清理 PD 调度器环境变量
+    # Cleanup PD-scheduler env vars
     unset VLLM_PD_SCHEDULER_MODE VLLM_PD_K_MODE VLLM_PD_K_RATIO \
           VLLM_USE_PD_SCHEDULER 2>/dev/null || true
 
-    # 分配 GPU: 前 n_prefill 个做 prefill，后 n_decode 个做 decode
+    # Assign GPUs: first n_prefill for prefill, the rest for decode
     local gpus=($GPU1 $GPU2 $GPU3 $GPU4)
     local prefill_gpus=("${gpus[@]:0:$n_prefill}")
     local decode_gpus=("${gpus[@]:$n_prefill:$n_decode}")
@@ -160,7 +160,7 @@ run_disagg_bench() {
     echo "  Prefill GPUs: ${prefill_gpus[*]}"
     echo "  Decode GPUs: ${decode_gpus[*]}"
 
-    # 清理端口
+    # Free port
     local proxy_port=$DISAGG_BASE_PORT
     local all_ports="$proxy_port"
     for i in $(seq 0 $((n_prefill - 1))); do
@@ -183,7 +183,7 @@ run_disagg_bench() {
     local prefill_kv_ports=""
     local decode_kv_ports=""
 
-    # 启动 prefill 实例
+    # Launch prefill instance
     for i in $(seq 0 $((n_prefill - 1))); do
         local gpu=${prefill_gpus[$i]}
         local port=$((DISAGG_BASE_PORT + 100 + i))
@@ -203,7 +203,7 @@ run_disagg_bench() {
         prefill_kv_ports="${prefill_kv_ports}${kv_port}"
     done
 
-    # 启动 decode 实例
+    # Launch decode instance
     for i in $(seq 0 $((n_decode - 1))); do
         local gpu=${decode_gpus[$i]}
         local port=$((DISAGG_BASE_PORT + 200 + i))
@@ -223,12 +223,12 @@ run_disagg_bench() {
         decode_kv_ports="${decode_kv_ports}${kv_port}"
     done
 
-    # 等待所有实例启动
+    # Wait for all instances to come up
     for i in $(seq 0 $((n_prefill - 1))); do
         local port=$((DISAGG_BASE_PORT + 100 + i))
         local pid_idx=$i
         if ! wait_for_server $port ${pids[$pid_idx]} 300 "${log_dir}/disagg_${config_name}_prefill${i}.log"; then
-            echo "disagg ${config_name} prefill${i} 启动失败"
+            echo "disagg ${config_name} prefill${i} failed to start"
             for p in "${pids[@]}"; do kill $p 2>/dev/null; done
             return 1
         fi
@@ -237,14 +237,14 @@ run_disagg_bench() {
         local port=$((DISAGG_BASE_PORT + 200 + i))
         local pid_idx=$((n_prefill + i))
         if ! wait_for_server $port ${pids[$pid_idx]} 300 "${log_dir}/disagg_${config_name}_decode${i}.log"; then
-            echo "disagg ${config_name} decode${i} 启动失败"
+            echo "disagg ${config_name} decode${i} failed to start"
             for p in "${pids[@]}"; do kill $p 2>/dev/null; done
             return 1
         fi
     done
     echo "${config_name} servers ready"
 
-    # 启动 multi proxy
+    # Launch multi proxy
     python3 "${SCRIPT_DIR}/disagg_multi_proxy.py" \
         --port $proxy_port \
         --prefill-urls "$prefill_urls" \
@@ -255,11 +255,11 @@ run_disagg_bench() {
     local proxy_pid=$!
     sleep 3
 
-    # 验证
+    # Verify
     if ! curl -s --max-time 60 http://localhost:${proxy_port}/v1/completions \
         -H "Content-Type: application/json" \
         -d '{"model":"'"$MODEL"'","prompt":"test","max_tokens":1}' >/dev/null 2>&1; then
-        echo "disagg ${config_name} proxy 验证失败"
+        echo "disagg ${config_name} proxy verification failed"
         kill $proxy_pid 2>/dev/null
         for p in "${pids[@]}"; do kill $p 2>/dev/null; done
         return 1
@@ -272,7 +272,7 @@ run_disagg_bench() {
         --result-filename "$result_file" \
         >> "${log_dir}/disagg_${config_name}_bench.log" 2>&1 || status=$?
     if [ $status -eq 124 ]; then
-        echo "disagg ${config_name} 超时 (${DISAGG_BENCH_TIMEOUT}s)"
+        echo "disagg ${config_name} timeout (${DISAGG_BENCH_TIMEOUT}s)"
     fi
 
     kill $proxy_pid 2>/dev/null
@@ -285,33 +285,33 @@ run_disagg_bench() {
         fi
     done
 
-    # 等待 GPU 显存释放和 zmq/kv 端口从 TIME_WAIT 释放，避免下一个 disagg 实验冲突
+    # Wait for GPU memory and zmq/kv ports to leave TIME_WAIT before the next disagg run
     for gpu in $GPU1 $GPU2 $GPU3 $GPU4; do
         wait_for_gpu_memory $gpu 60 || true
     done
 
-    [ $status -eq 0 ] && echo "disagg ${config_name} 完成" || echo "disagg ${config_name} 失败 (exit=$status)"
+    [ $status -eq 0 ] && echo "disagg ${config_name} done" || echo "disagg ${config_name} failed (exit=$status)"
     return $status
 }
 
 # ========================================
-# 运行实验 (先跑 disagg，更早发现问题)
+# Run experiments (disagg first to fail fast)
 # ========================================
 if [ "$SKIP_DISAGG" != "1" ]; then
-    run_disagg_bench 1 3 "bench_disagg_1P3D.json" || echo "警告: disagg 1P+3D 失败"
-    run_disagg_bench 2 2 "bench_disagg_2P2D.json" || echo "警告: disagg 2P+2D 失败"
-    run_disagg_bench 3 1 "bench_disagg_3P1D.json" || echo "警告: disagg 3P+1D 失败"
+    run_disagg_bench 1 3 "bench_disagg_1P3D.json" || echo "Warning: disagg 1P+3D failed"
+    run_disagg_bench 2 2 "bench_disagg_2P2D.json" || echo "Warning: disagg 2P+2D failed"
+    run_disagg_bench 3 1 "bench_disagg_3P1D.json" || echo "Warning: disagg 3P+1D failed"
 fi
 
-run_dp4_bench "baseline" "bench_baseline.json" || echo "警告: baseline 失败"
-run_dp4_bench "pd_auto" "bench_pd_auto.json" || echo "警告: pd_auto 失败"
+run_dp4_bench "baseline" "bench_baseline.json" || echo "Warning: baseline failed"
+run_dp4_bench "pd_auto" "bench_pd_auto.json" || echo "Warning: pd_auto failed"
 
 # ========================================
-# 汇总结果
+# Summarize results
 # ========================================
 echo ""
 echo "========================================"
-echo "结果汇总 (4-GPU, concurrency=${MAX_CONCURRENCY}, ${NUM_PROMPTS} prompts)"
+echo "Result summary (4-GPU, concurrency=${MAX_CONCURRENCY}, ${NUM_PROMPTS} prompts)"
 echo "  INPUT_LEN=${INPUT_LEN}, OUTPUT_LEN=${OUTPUT_LEN}"
 echo "========================================"
 echo ""
@@ -330,4 +330,4 @@ print(f'{name:<15s} {d[\"total_token_throughput\"]:15.2f} {d[\"output_throughput
 done
 
 echo ""
-echo "结果目录: $OUTPUT_DIR"
+echo "Output directory: $OUTPUT_DIR"

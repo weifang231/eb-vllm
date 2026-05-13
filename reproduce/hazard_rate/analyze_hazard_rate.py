@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Hazard Rate Ordering 实验分析脚本
+Hazard Rate Ordering experiment analysis script.
 
-功能：
-  - 从 Gamma 分布 k* sweep 结果中找到最优 k* 和对应的 θ*
-  - 验证 k*_DFR < k*_CFR < k*_IFR
+Features:
+  - Find optimal k* and the corresponding theta* from Gamma k* sweeps.
+  - Verify k*_DFR < k*_CFR < k*_IFR.
 
-用法：
+Usage:
   python analyze_hazard_rate.py <results_dir>
   python analyze_hazard_rate.py outputs/hazard_rate_ordering_N256_O128
 """
@@ -21,7 +21,7 @@ import numpy as np
 
 
 def load_json(filepath: Path) -> dict | None:
-    """加载 JSON 文件"""
+    """Load a JSON file."""
     try:
         with open(filepath, encoding='utf-8') as f:
             return json.load(f)
@@ -31,7 +31,7 @@ def load_json(filepath: Path) -> dict | None:
 
 
 def extract_k_from_filename(filename: str) -> int | None:
-    """从文件名中提取 k* 值"""
+    """Extract k* from a filename."""
     match = re.search(r'fixed(\d+)', filename)
     if match:
         return int(match.group(1))
@@ -39,15 +39,15 @@ def extract_k_from_filename(filename: str) -> int | None:
 
 
 def get_throughput(bench_result: dict) -> float:
-    """从 benchmark 结果中提取吞吐量"""
+    """Extract throughput from a benchmark result."""
     return bench_result.get("output_throughput", 0)
 
 
 def analyze_hazard_type(scenario_dir: Path) -> dict:
-    """分析单个 hazard type 的结果，找到最优 k*"""
+    """Analyze a single hazard type, find optimal k*."""
     results = defaultdict(list)
 
-    # 收集所有 k* 的吞吐量
+    # Collect throughput across all k*
     for bench_file in scenario_dir.glob("bench_fixed*_run*.json"):
         k_star = extract_k_from_filename(bench_file.name)
         if k_star is None:
@@ -60,7 +60,7 @@ def analyze_hazard_type(scenario_dir: Path) -> dict:
         throughput = get_throughput(data)
         results[k_star].append(throughput)
 
-    # 如果没有 _run 后缀的文件
+    # If there are no _run-suffixed files
     if not results:
         for bench_file in scenario_dir.glob("bench_fixed*.json"):
             if "_run" in bench_file.name:
@@ -79,7 +79,7 @@ def analyze_hazard_type(scenario_dir: Path) -> dict:
     if not results:
         return {}
 
-    # 计算每个 k* 的平均吞吐量和标准差
+    # Per-k* throughput mean / std
     k_stats = {}
     for k, throughputs in results.items():
         k_stats[k] = {
@@ -88,7 +88,7 @@ def analyze_hazard_type(scenario_dir: Path) -> dict:
             "n": len(throughputs),
         }
 
-    # 找到最优 k*
+    # Find optimal k*
     optimal_k = max(k_stats, key=lambda k: k_stats[k]["mean"])
     optimal_stats = k_stats[optimal_k]
 
@@ -102,24 +102,24 @@ def analyze_hazard_type(scenario_dir: Path) -> dict:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Hazard Rate Ordering 实验分析：验证 k*_DFR < k*_CFR < k*_IFR"
+        description="Hazard Rate Ordering analysis: verify k*_DFR < k*_CFR < k*_IFR"
     )
     parser.add_argument(
         "results_dir",
         type=str,
-        help="实验结果目录"
+        help="Experiment output directory"
     )
     parser.add_argument(
         "--batch-size", "-N",
         type=int,
         default=256,
-        help="批大小 N (默认 256)"
+        help="batch size N (default 256)"
     )
     parser.add_argument(
         "--output",
         type=str,
         default=None,
-        help="输出 JSON 文件路径"
+        help="output JSON path"
     )
     args = parser.parse_args()
 
@@ -130,22 +130,22 @@ def main():
         print(f"Error: Directory {results_dir} does not exist")
         return
 
-    # 加载实验配置
+    # Load experiment configuration
     config_file = results_dir / "experiment_config.json"
     if config_file.exists():
         config = load_json(config_file)
         if config:
             N = config.get("fixed_params", {}).get("N", N)
-            print(f"从配置文件读取 N = {N}")
+            print(f"Reading N = {N} from config file")
 
     print(f"\n{'='*60}")
-    print("Hazard Rate Ordering 实验")
-    print(f"验证: k*_DFR < k*_CFR < k*_IFR")
+    print("Hazard Rate Ordering experiment")
+    print(f"Verifying: k*_DFR < k*_CFR < k*_IFR")
     print(f"{'='*60}")
-    print(f"批大小 N = {N}")
+    print(f"batch size N = {N}")
     print()
 
-    # 分析每个 hazard type
+    # Analyze each hazard type
     results = {}
     hazard_order = ["DFR", "CFR", "IFR"]
 
@@ -153,7 +153,7 @@ def main():
         if not scenario_dir.is_dir():
             continue
 
-        # 解析场景名: DFR_shape0.5, CFR_shape1.0, IFR_shape2.0
+        # Parse scenario name: DFR_shape0.5, CFR_shape1.0, IFR_shape2.0
         match = re.match(r'(DFR|CFR|IFR)_shape([\d.]+)', scenario_dir.name)
         if not match:
             continue
@@ -161,19 +161,19 @@ def main():
         hazard_type = match.group(1)
         gamma_shape = float(match.group(2))
 
-        print(f"分析场景: {hazard_type} (shape={gamma_shape})")
+        print(f"Analyzing scenario: {hazard_type} (shape={gamma_shape})")
 
         scenario_result = analyze_hazard_type(scenario_dir)
         if not scenario_result:
-            print(f"  警告: 没有找到有效结果")
+            print(f"  Warning: no valid results found")
             continue
 
         optimal_k = scenario_result["optimal_k_star"]
         theta_star = optimal_k / N
 
-        print(f"  最优 k* = {optimal_k}")
+        print(f"  optimal k* = {optimal_k}")
         print(f"  θ* = k*/N = {theta_star:.4f}")
-        print(f"  吞吐量 = {scenario_result['optimal_throughput_mean']:.2f} "
+        print(f"  throughput = {scenario_result['optimal_throughput_mean']:.2f} "
               f"± {scenario_result['optimal_throughput_std']:.2f} tokens/s")
 
         results[hazard_type] = {
@@ -186,11 +186,11 @@ def main():
         }
 
     if len(results) < 3:
-        print(f"\n警告: 只找到 {len(results)} 个 hazard type 的结果，无法完整验证")
+        print(f"\nWarning: only {len(results)} hazard types found; cannot fully verify")
 
-    # 验证排序
+    # Verify ordering
     print(f"\n{'='*60}")
-    print("验证 k*_DFR < k*_CFR < k*_IFR")
+    print("Verifying k*_DFR < k*_CFR < k*_IFR")
     print(f"{'='*60}")
 
     print(f"\n{'Hazard Type':<12} {'Shape':<8} {'k*':<8} {'θ*':<8}")
@@ -206,8 +206,8 @@ def main():
             k_stars[hazard_type] = r["optimal_k_star"]
             theta_stars[hazard_type] = r["theta_star"]
 
-    # 检验排序
-    print(f"\n验证结果:")
+    # Check ordering
+    print(f"\nValidation result:")
     if len(k_stars) == 3:
         k_dfr = k_stars.get("DFR", float('inf'))
         k_cfr = k_stars.get("CFR", float('inf'))
@@ -215,19 +215,19 @@ def main():
 
         if k_dfr < k_cfr < k_ifr:
             print(f"  √ k*_DFR ({k_dfr}) < k*_CFR ({k_cfr}) < k*_IFR ({k_ifr})")
-            print(f"  √ Hazard rate ordering 验证通过!")
+            print(f"  ok Hazard rate ordering verified!")
         elif k_dfr <= k_cfr <= k_ifr:
             print(f"  ~ k*_DFR ({k_dfr}) ≤ k*_CFR ({k_cfr}) ≤ k*_IFR ({k_ifr})")
-            print(f"  ~ Hazard rate ordering 部分验证 (存在相等情况)")
+            print(f"  ~ Hazard rate ordering partially verified (ties present)")
         else:
-            print(f"  × 排序不符合预期:")
+            print(f"  x Ordering does not match expectation:")
             print(f"    k*_DFR = {k_dfr}, k*_CFR = {k_cfr}, k*_IFR = {k_ifr}")
-            print(f"  × Hazard rate ordering 验证失败")
+            print(f"  x Hazard rate ordering verification FAILED")
     else:
-        print(f"  ? 数据不完整，无法验证")
+        print(f"  ? data incomplete, cannot verify")
 
-    # 输出 LaTeX 格式
-    print(f"\nLaTeX 格式:")
+    # Print LaTeX format
+    print(f"\nLaTeX format:")
     theta_values = []
     for hazard_type in hazard_order:
         if hazard_type in theta_stars:
@@ -239,7 +239,7 @@ def main():
     print(f"  we obtain $\\hat{{\\theta}}^* = $ {', '.join(theta_values)} respectively")
     print(f"  ($N = {N}$, 3 runs), confirming the predicted ordering.")
 
-    # 保存结果
+    # Save results
     if args.output:
         output_data = {
             "experiment": "hazard_rate_ordering",
@@ -258,7 +258,7 @@ def main():
         }
         with open(args.output, 'w') as f:
             json.dump(output_data, f, indent=2)
-        print(f"\n结果已保存到: {args.output}")
+        print(f"\nResults saved to: {args.output}")
 
 
 if __name__ == "__main__":

@@ -23,8 +23,10 @@ import json
 import os
 import sys
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add reproduce/common/ to path for dataset_utils.
+# Script lives at reproduce/real_workloads/multiturn/; ../../common/ is the target.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(_HERE, "..", "..", "common"))
 
 import numpy as np
 from transformers import AutoTokenizer

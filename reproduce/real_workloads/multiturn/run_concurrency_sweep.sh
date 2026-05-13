@@ -4,8 +4,8 @@
 # 固定每个 scheduler 的最优 (TB, BS) 配置，扫描不同并发度下的 TTFT/TPOT/RPS
 #
 # 目的:
-#   TODO 1: 在低并发 (64, 256) 下展示 scheduler 本身的 TTFT 影响 (排队延迟最小化)
-#   TODO 2: 扫描并发度，找到满足 SLO 约束的最大吞吐
+#   目标 1: 在低并发 (64, 256) 下展示 scheduler 本身的 TTFT 影响 (排队延迟最小化)
+#   目标 2: 扫描并发度，找到满足 SLO 约束的最大吞吐
 #
 # 用法: ./run_concurrency_sweep.sh [MAX_GPUS]
 #
@@ -295,7 +295,8 @@ run_experiment() {
     fi
 
     # 运行多轮对话 benchmark
-    python benchmarks/multi_turn/benchmark_serving_multi_turn_threaded.py \
+    local _bench_dir="${SCRIPT_DIR}/../../../benchmarks/multi_turn"
+    ( cd "$_bench_dir" && python benchmark_serving_multi_turn_threaded.py \
         --input-file "$DATASET_PATH" \
         --model "$MODEL" \
         --url "http://localhost:${port}" \
@@ -305,7 +306,7 @@ run_experiment() {
         --limit-max-tokens "$LIMIT_MAX_TOKENS" \
         --request-timeout-sec "$REQUEST_TIMEOUT" \
         --output-file "${result_dir}/${scheduler}_conversations.json" \
-        --metrics-file "${result_dir}/bench_${scheduler}.json" \
+        --metrics-file "${result_dir}/bench_${scheduler}.json" ) \
         > "$bench_log" 2>&1
     local bench_status=$?
 

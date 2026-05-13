@@ -1,8 +1,8 @@
 """
 FlashAttention Microbenchmark: Pure Prefill vs Pure Decode vs Mixed
 
-测试 FlashAttention kernel 在不同 batch 组成下的性能差异，
-用于分析为什么 A6000 上 PD scheduler 效果比 H200 更显著。
+Tests FlashAttention kernel performance under different batch compositions,
+Used to analyze why the PD scheduler is more effective on A6000 than on H200.
 
 Usage:
     python reproduce/cost_model/kernel_breakdown/benchmark_flash_attn.py \
@@ -31,7 +31,7 @@ def create_attention_inputs(
     device: str = "cuda",
     dtype: torch.dtype = torch.float16,
 ) -> Tuple[torch.Tensor, ...]:
-    """创建 FlashAttention 的输入张量"""
+    """Create input tensors for FlashAttention."""
 
     total_tokens = sum(query_lens)
     max_context = max(context_lens)
@@ -145,12 +145,12 @@ def benchmark_scenario(
 
 
 def plot_results(results: List[dict], output_path: str, gpu_name: str):
-    """绘制 benchmark 结果图表，计算斜率"""
-    # 提取数据
+    """Plot benchmark results and compute slopes."""
+    # Extract data
     pure_decode = next(r for r in results if r['scenario'] == 'pure_decode')
     pure_decode_time = pure_decode['avg_time_ms']
 
-    # 收集 mixed 场景数据 (只取 10%, 20%, 40%, 80%)
+    # Collect mixed-scenario data (only 10%, 20%, 40%, 80%)
     prefill_pcts = []
     slowdowns = []
     times = []
@@ -163,14 +163,14 @@ def plot_results(results: List[dict], output_path: str, gpu_name: str):
             slowdowns.append(mixed['avg_time_ms'] / pure_decode_time)
             times.append(mixed['avg_time_ms'])
 
-    # 计算线性回归斜率
+    # Linear-regression slope
     fit_x = np.linspace(0, 100, 100)
     if len(prefill_pcts) >= 2:
         pcts_arr = np.array(prefill_pcts)
         slowdowns_arr = np.array(slowdowns)
         times_arr = np.array(times)
 
-        # 斜率计算: y = slope * x + intercept
+        # Slope computation: y = slope * x + intercept
         slope_slowdown, intercept_slowdown = np.polyfit(pcts_arr, slowdowns_arr, 1)
         slope_time, intercept_time = np.polyfit(pcts_arr, times_arr, 1)
 
@@ -183,14 +183,14 @@ def plot_results(results: List[dict], output_path: str, gpu_name: str):
     else:
         slope_slowdown = slope_time = intercept_slowdown = intercept_time = 0
 
-    # 创建图表
+    # Create plots
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
-    # 图1: Slowdown vs Prefill Percentage
+    # Fig 1: Slowdown vs Prefill Percentage
     ax1 = axes[0]
     ax1.plot(prefill_pcts, slowdowns, 'bo-', linewidth=2, markersize=10, label='Measured')
 
-    # 画拟合线
+    # Plot the fit line
     if len(prefill_pcts) >= 2:
         fit_x = np.linspace(0, 100, 100)
         fit_y = slope_slowdown * fit_x + intercept_slowdown
@@ -204,16 +204,16 @@ def plot_results(results: List[dict], output_path: str, gpu_name: str):
     ax1.set_xlim(0, 90)
     ax1.legend(loc='upper left')
 
-    # 标注关键点
+    # Annotate key points
     for pct, sd in zip(prefill_pcts, slowdowns):
         ax1.annotate(f'{sd:.2f}x', (pct, sd), textcoords="offset points",
                     xytext=(0, 10), ha='center', fontsize=10, fontweight='bold')
 
-    # 图2: Kernel Time vs Prefill Percentage
+    # Fig 2: Kernel Time vs Prefill Percentage
     ax2 = axes[1]
     ax2.plot(prefill_pcts, times, 'go-', linewidth=2, markersize=10, label='Measured')
 
-    # 画拟合线
+    # Plot the fit line
     if len(prefill_pcts) >= 2:
         fit_y = slope_time * fit_x + intercept_time
         ax2.plot(fit_x, fit_y, 'r--', linewidth=1.5, alpha=0.7,
@@ -226,7 +226,7 @@ def plot_results(results: List[dict], output_path: str, gpu_name: str):
     ax2.set_xlim(0, 90)
     ax2.legend(loc='upper left')
 
-    # 标注关键点
+    # Annotate key points
     for pct, t in zip(prefill_pcts, times):
         ax2.annotate(f'{t:.2f}ms', (pct, t), textcoords="offset points",
                     xytext=(0, 10), ha='center', fontsize=10, fontweight='bold')
@@ -390,11 +390,11 @@ def main():
             json.dump(output_data, f, indent=2)
         print(f"\nResults saved to {args.output}")
 
-        # 生成图表
+        # Generate plots
         plot_path = args.output.replace('.json', '.png')
         slope_info = plot_results(results, plot_path, gpu_name)
 
-        # 更新 JSON 添加斜率信息
+        # Update JSON with slope information
         output_data["slope_analysis"] = slope_info
         with open(args.output, "w") as f:
             json.dump(output_data, f, indent=2)

@@ -1,33 +1,33 @@
 #!/bin/bash
 
-# Distribution Shift 实验脚本 (3-phase synthetic data)
-# 验证 THETA 的 IFR 在线 controller 在 workload 突变时的行为:
-#   1. θ* 能在 ~W 个样本内收敛到新最优值
-#   2. 系统保持 memory-safe (无 OOM)
-#   3. 吞吐量暂时下降幅度有限
+# Distribution Shift experiment script (3-phase synthetic data)
+# Validates the IFR online controller under sudden workload shifts:
+#   1. theta* converges to the new optimum within ~W samples
+#   2. System remains memory-safe (no OOM)
+#   3. Throughput dip during transitions is bounded
 #
-# 实验设计 (3 phases):
+# Experiment design (3 phases):
 #   Phase 1: prefill-heavy  (input~1024, output~128)
 #   Phase 2: balanced        (input~512,  output~512)
 #   Phase 3: decode-heavy   (input~128,  output~1024)
-#   对比: pd_ifr (自适应 θ*) vs pd_ratio (固定 θ*=0.8)
+#   Compare: pd_ifr (adaptive theta*) vs pd_ratio (fixed theta*=0.8)
 #
-# 用法: ./run_distribution_shift.sh [GPU_ID]
+# Usage: ./run_distribution_shift.sh [GPU_ID]
 #
-# 环境变量:
-#   MODEL: 模型路径，默认 Qwen/Qwen3-8B
-#   NUM_PROMPTS_PER_PHASE: 每个阶段的请求数，默认 2000
-#   MAX_CONCURRENCY: 最大并发，默认 2048
-#   IFR_WINDOW_SIZE: IFR 滑动窗口大小，默认 500
-#   PHASES: phase 定义，默认 "1024:128,512:512,128:1024"
-#   OUTPUT_VARIANCE: output_len 方差比例，默认 0.25
+# Environment variables:
+#   MODEL: model path, default Qwen/Qwen3-8B
+#   NUM_PROMPTS_PER_PHASE: requests per phase, default 2000
+#   MAX_CONCURRENCY: max concurrency, default 2048
+#   IFR_WINDOW_SIZE: IFR sliding-window size, default 500
+#   PHASES: phase definitions, default "1024:128,512:512,128:1024"
+#   OUTPUT_VARIANCE: output_len variance ratio, default 0.25
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../../common/common.sh"
 
-# 实验参数
+# Experiment parameters
 GPU_ID=${1:-0}
 MODEL=${MODEL:-"Qwen/Qwen3-8B"}
 MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
@@ -40,29 +40,29 @@ PHASES=${PHASES:-"1024:128,512:512,128:1024"}
 OUTPUT_VARIANCE=${OUTPUT_VARIANCE:-0.25}
 SOURCE_DATASET=${SOURCE_DATASET:-"alpaca"}
 
-# 最优配置 (H200)
+# Optimal configuration (H200)
 TB=${TB:-18432}
 BS=${BS:-2048}
 
-# 计算 phase 数量和总请求数
+# Compute phase count and total request count
 NUM_PHASES=$(echo "$PHASES" | tr ',' '\n' | wc -l)
 TOTAL_PROMPTS=$((NUM_PROMPTS_PER_PHASE * NUM_PHASES))
 
-# 硬件校准文件 (不存在则自动运行校准)
+# Hardware calibration file (auto-runs calibration if missing).
 ensure_calibration "$MODEL" "$MODEL_SHORT"
 
-# 输出目录
+# Output directory
 OUTPUT_DIR="${SCRIPT_DIR}/../outputs/distribution_shift_${MODEL_SHORT}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUTPUT_DIR/logs"
 
-# 初始化环境
+# Initialize environment
 init_experiment_env
 
 echo "========================================"
-echo "Distribution Shift 实验 (${NUM_PHASES}-phase)"
+echo "Distribution Shift experiment (${NUM_PHASES}-phase)"
 echo "========================================"
 echo ""
-echo "实验配置:"
+echo "Experiment configuration:"
 echo "  MODEL: $MODEL"
 echo "  GPU: $GPU_ID"
 echo "  TB: $TB, BS: $BS"
@@ -75,10 +75,10 @@ echo "  OUTPUT_VARIANCE: $OUTPUT_VARIANCE"
 echo ""
 
 # ========================================
-# Step 1: 生成合成数据集
+# Step 1: generate synthetic dataset
 # ========================================
 SYNTHETIC_DATASET="${OUTPUT_DIR}/synthetic_${NUM_PHASES}phase.jsonl"
-echo "生成合成数据集..."
+echo "Generating synthetic dataset..."
 
 python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
     --model "$MODEL" \
@@ -90,9 +90,9 @@ python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
     --seed 42
 
 echo ""
-echo "数据集已生成: $SYNTHETIC_DATASET"
+echo "Dataset generated: $SYNTHETIC_DATASET"
 
-# 构建 phases JSON array
+# Build phases JSON array
 PHASES_JSON=$(python3 -c "
 import json
 phases = '$PHASES'.split(',')
@@ -111,7 +111,7 @@ for p in phases:
 print(json.dumps(result))
 ")
 
-# 保存实验配置
+# Save experiment configuration
 cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
 {
     "experiment_type": "distribution_shift",
@@ -135,7 +135,7 @@ cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
 EOF
 
 # ========================================
-# Step 2: 运行实验
+# Step 2: run experiments
 # ========================================
 run_single_experiment() {
     local scheduler=$1
@@ -144,12 +144,12 @@ run_single_experiment() {
 
     echo ""
     echo "========================================"
-    echo "运行: ${scheduler}"
+    echo "Running: ${scheduler}"
     echo "========================================"
 
     : > "$log_file"
 
-    # 设置环境变量
+    # Set environment variables
     export CUDA_VISIBLE_DEVICES=$GPU_ID
     export VLLM_COLLECT_SCHEDULE_STATS=1
 
@@ -179,7 +179,7 @@ run_single_experiment() {
 
     wait_for_gpu_memory $GPU_ID 60 || return 1
 
-    # 启动服务
+    # Launch server
     local dtype_arg=""
     if [ -n "${DTYPE:-}" ]; then
         dtype_arg="--dtype $DTYPE"
@@ -195,17 +195,17 @@ run_single_experiment() {
     local server_pid=$!
 
     if ! wait_for_server $port $server_pid 180 "$log_file"; then
-        echo "服务启动失败: ${scheduler}"
+        echo "Server failed to start: ${scheduler}"
         kill_server $server_pid $GPU_ID
         return 1
     fi
 
-    echo "服务已启动 (PID: $server_pid, port: $port)"
-    echo "开始 benchmark..."
+    echo "Server up (PID: $server_pid, port: $port)"
+    echo "Starting benchmark..."
 
-    # 运行 benchmark
-    # --custom-output-len -1: 使用 JSONL 中每个请求的 output_len
-    # --ignore-eos: 强制生成指定长度（否则模型遇到 EOS 就停止，无法控制输出长度）
+    # Run benchmark
+    # --custom-output-len -1: use the per-request output_len from JSONL
+    # --ignore-eos: force a fixed length (without it the model stops at EOS, preventing output-length control)
     local bench_status=0
     vllm bench serve \
         --model "$MODEL" \
@@ -227,29 +227,29 @@ run_single_experiment() {
     kill_server $server_pid $GPU_ID
 
     if [ $bench_status -eq 0 ]; then
-        echo "完成: ${scheduler}"
+        echo "Done: ${scheduler}"
     else
-        echo "失败: ${scheduler}"
+        echo "Failed: ${scheduler}"
     fi
 
     return $bench_status
 }
 
-# 运行指定的 scheduler (可通过 SCHEDULERS 环境变量控制)
-# 例: SCHEDULERS="baseline,pd_auto" bash run_distribution_shift.sh 0
+# Run the requested schedulers (controlled via the SCHEDULERS env var)
+# Example: SCHEDULERS="baseline,pd_auto" bash run_distribution_shift.sh 0
 DEFAULT_SCHEDULERS="baseline,pd_ifr,pd_ratio,pd_auto"
 IFS=',' read -ra SCHEDULER_LIST <<< "${SCHEDULERS:-$DEFAULT_SCHEDULERS}"
 for sched in "${SCHEDULER_LIST[@]}"; do
     sched=$(echo "$sched" | tr -d ' ')
-    run_single_experiment "$sched" || echo "警告: ${sched} 实验失败 (exit=$?)"
+    run_single_experiment "$sched" || echo "Warning: ${sched} experiment failed (exit=$?)"
 done
 
 echo ""
 echo "========================================"
-echo "实验完成!"
+echo "Experiment finished!"
 echo "========================================"
 echo ""
-echo "结果目录: $OUTPUT_DIR"
+echo "Output directory: $OUTPUT_DIR"
 echo ""
-echo "运行分析脚本:"
+echo "Run the analysis script:"
 echo "  python reproduce/eb_plus/non_stationary/ or long_context/ or disagg/plot_distribution_shift.py $OUTPUT_DIR"

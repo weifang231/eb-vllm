@@ -1,33 +1,33 @@
 #!/bin/bash
 
-# vLLM Disaggregated Prefill 基准测试
-# 使用 vLLM 官方的 P/D disaggregation 方案 (2 GPU: 1 prefill + 1 decode)
-# 与我们的单 GPU PD scheduler 做对比
+# vLLM Disaggregated Prefill benchmark.
+# Uses vLLM's official P/D disaggregation (2 GPU: 1 prefill + 1 decode).
+# Compares with our single-GPU PD scheduler.
 #
-# 架构:
+# Architecture:
 #   GPU 0: prefill instance (kv_producer, port 8100)
 #   GPU 1: decode instance  (kv_consumer, port 8200)
-#   Proxy: port 8000, 路由请求到 prefill → decode
+#   Proxy: port 8000, routes requests prefill -> decode
 #
-# 用法: ./run_disagg_baseline.sh [PREFILL_GPU] [DECODE_GPU]
+# Usage: ./run_disagg_baseline.sh [PREFILL_GPU] [DECODE_GPU]
 #
-# 环境变量:
-#   MODEL: 模型路径，默认 Qwen/Qwen3-8B
-#   CONCURRENCY_PHASES: 并发阶段，格式同 run_concurrency_shift.sh
-#   INPUT_LEN / OUTPUT_LEN: 固定 input/output 长度
-#   PROXY_PORT: proxy 端口，默认 8000
-#   PREFILL_PORT / DECODE_PORT: prefill/decode 实例端口
+# Environment variables:
+#   MODEL: model path, default Qwen/Qwen3-8B
+#   CONCURRENCY_PHASES: concurrency phases, same format as run_concurrency_shift.sh
+#   INPUT_LEN / OUTPUT_LEN: fixed input/output length
+#   PROXY_PORT: proxy port, default 8000
+#   PREFILL_PORT / DECODE_PORT: prefill/decode instance ports
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../common/common.sh"
 
-# GPU 分配
+# GPU allocation
 PREFILL_GPU=${1:-0}
 DECODE_GPU=${2:-1}
 
-# 实验参数
+# Experiment parameters
 MODEL=${MODEL:-"Qwen/Qwen3-8B"}
 MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
 NUM_PROMPTS_PER_PHASE=${NUM_PROMPTS_PER_PHASE:-2000}
@@ -37,17 +37,17 @@ OUTPUT_LEN=${OUTPUT_LEN:-256}
 OUTPUT_VARIANCE=${OUTPUT_VARIANCE:-0.25}
 SOURCE_DATASET=${SOURCE_DATASET:-"alpaca"}
 
-# 端口配置
+# Port configuration
 PROXY_PORT=${PROXY_PORT:-9000}
 PREFILL_PORT=${PREFILL_PORT:-9100}
 DECODE_PORT=${DECODE_PORT:-9200}
 
-# 服务配置
+# Server configuration
 TB=${TB:-18432}
 BS=${BS:-2048}
 KV_BUFFER_SIZE=${KV_BUFFER_SIZE:-2e10}
 
-# 解析并发阶段
+# Parse concurrency phases
 IFS=',' read -ra _RAW_PHASES <<< "$CONCURRENCY_PHASES"
 NUM_PHASES=${#_RAW_PHASES[@]}
 PHASE_CONCURRENCIES=()
@@ -66,20 +66,20 @@ for _p in "${_RAW_PHASES[@]}"; do
     [ "$local_n" -gt "$MAX_PHASE_PROMPTS" ] && MAX_PHASE_PROMPTS=$local_n
 done
 
-# 输出目录
+# Output directory
 OUTPUT_DIR="${SCRIPT_DIR}/../outputs/disagg_baseline_${MODEL_SHORT}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUTPUT_DIR/logs"
 
-# 初始化环境
+# Initialize environment
 init_experiment_env
 
 export VLLM_HOST_IP=${VLLM_HOST_IP:-127.0.0.1}
 
 echo "========================================"
-echo "Disaggregated Prefill 基准测试 (${NUM_PHASES}-phase)"
+echo "Disaggregated Prefill benchmark (${NUM_PHASES}-phase)"
 echo "========================================"
 echo ""
-echo "实验配置:"
+echo "Experiment configuration:"
 echo "  MODEL: $MODEL"
 echo "  Prefill GPU: $PREFILL_GPU, Decode GPU: $DECODE_GPU"
 echo "  TB: $TB, BS: $BS"
@@ -89,10 +89,10 @@ echo "  Ports: proxy=$PROXY_PORT, prefill=$PREFILL_PORT, decode=$DECODE_PORT"
 echo ""
 
 # ========================================
-# Step 1: 生成合成数据集 (与 concurrency_shift 相同)
+# Step 1: generate synthetic dataset (same as concurrency_shift)
 # ========================================
 SYNTHETIC_DATASET="${OUTPUT_DIR}/synthetic_uniform.jsonl"
-echo "生成合成数据集 (uniform: input~${INPUT_LEN}, output~${OUTPUT_LEN})..."
+echo "Generating synthetic dataset (uniform: input~${INPUT_LEN}, output~${OUTPUT_LEN})..."
 
 python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
     --model "$MODEL" \
@@ -104,9 +104,9 @@ python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
     --seed 42
 
 echo ""
-echo "数据集已生成: $SYNTHETIC_DATASET"
+echo "Dataset generated: $SYNTHETIC_DATASET"
 
-# 构建 phases JSON
+# Build phases JSON
 PHASES_JSON=$(python3 -c "
 import json
 concurrencies = '${PHASE_CONCURRENCIES[*]}'.split()
@@ -115,7 +115,7 @@ result = [{'concurrency': int(c), 'num_prompts': int(n)} for c, n in zip(concurr
 print(json.dumps(result))
 ")
 
-# 保存实验配置
+# Save experiment configuration
 cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
 {
     "experiment_type": "disagg_baseline",
@@ -136,21 +136,21 @@ cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
 EOF
 
 # ========================================
-# Step 2: 启动 disagg 服务
+# Step 2: launch disagg services
 # ========================================
 PREFILL_LOG="${OUTPUT_DIR}/logs/prefill.log"
 DECODE_LOG="${OUTPUT_DIR}/logs/decode.log"
 PROXY_LOG="${OUTPUT_DIR}/logs/proxy.log"
 
 cleanup_disagg() {
-    echo "清理 disagg 服务..."
+    echo "Cleaning up disagg services..."
     [ -n "${PROXY_PID:-}" ] && kill $PROXY_PID 2>/dev/null || true
     [ -n "${PREFILL_PID:-}" ] && kill_server $PREFILL_PID $PREFILL_GPU
     [ -n "${DECODE_PID:-}" ] && kill_server $DECODE_PID $DECODE_GPU
 }
 trap cleanup_disagg EXIT
 
-echo "启动 prefill instance (GPU $PREFILL_GPU, port $PREFILL_PORT)..."
+echo "Launching prefill instance (GPU $PREFILL_GPU, port $PREFILL_PORT)..."
 
 local_dtype_arg=""
 if [ -n "${DTYPE:-}" ]; then
@@ -168,7 +168,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_GPU vllm serve "$MODEL" \
     >> "$PREFILL_LOG" 2>&1 &
 PREFILL_PID=$!
 
-echo "启动 decode instance (GPU $DECODE_GPU, port $DECODE_PORT)..."
+echo "Launching decode instance (GPU $DECODE_GPU, port $DECODE_PORT)..."
 
 CUDA_VISIBLE_DEVICES=$DECODE_GPU vllm serve "$MODEL" \
     --port $DECODE_PORT \
@@ -181,23 +181,23 @@ CUDA_VISIBLE_DEVICES=$DECODE_GPU vllm serve "$MODEL" \
     >> "$DECODE_LOG" 2>&1 &
 DECODE_PID=$!
 
-echo "等待 prefill instance 启动..."
+echo "Waiting for prefill instance..."
 if ! wait_for_server $PREFILL_PORT $PREFILL_PID 300 "$PREFILL_LOG"; then
-    echo "Prefill instance 启动失败"
+    echo "Prefill instance failed to start"
     exit 1
 fi
 
-echo "等待 decode instance 启动..."
+echo "Waiting for decode instance..."
 if ! wait_for_server $DECODE_PORT $DECODE_PID 300 "$DECODE_LOG"; then
-    echo "Decode instance 启动失败"
+    echo "Decode instance failed to start"
     exit 1
 fi
 
-echo "启动 proxy server (port $PROXY_PORT)..."
+echo "Launching proxy server (port $PROXY_PORT)..."
 
-# 确保 proxy 端口可用
+# Ensure proxy port is free
 if lsof -nP -iTCP:$PROXY_PORT -sTCP:LISTEN >/dev/null 2>&1; then
-    echo "警告: 端口 $PROXY_PORT 被占用，尝试清理..."
+    echo "Warning: port $PROXY_PORT busy, trying to free it..."
     lsof -t -i:$PROXY_PORT | xargs -r kill -9 2>/dev/null
     sleep 2
 fi
@@ -211,15 +211,15 @@ python3 "$PROXY_SCRIPT" \
     >> "$PROXY_LOG" 2>&1 &
 PROXY_PID=$!
 
-# 等待 proxy 启动
-echo "等待 proxy server 启动..."
+# Wait for proxy startup
+echo "Waiting for proxy server..."
 local_i=0
 while [ $local_i -lt 30 ]; do
     if curl -s "http://localhost:${PROXY_PORT}/" >/dev/null 2>&1; then
         break
     fi
     if ! kill -0 $PROXY_PID 2>/dev/null; then
-        echo "Proxy server 进程退出:"
+        echo "Proxy server process exited:"
         cat "$PROXY_LOG"
         exit 1
     fi
@@ -228,18 +228,18 @@ while [ $local_i -lt 30 ]; do
 done
 
 if [ $local_i -ge 30 ]; then
-    echo "Proxy server 启动超时"
+    echo "Proxy server startup timeout"
     cat "$PROXY_LOG"
     exit 1
 fi
 
-echo "所有服务已启动"
+echo "All services up"
 echo "  Prefill: PID=$PREFILL_PID, port=$PREFILL_PORT"
 echo "  Decode:  PID=$DECODE_PID, port=$DECODE_PORT"
 echo "  Proxy:   PID=$PROXY_PID, port=$PROXY_PORT"
 
 # ========================================
-# Step 3: 运行 benchmark (与 concurrency_shift 相同的 phases)
+# Step 3: run benchmark (same phases as concurrency_shift)
 # ========================================
 overall_status=0
 
@@ -270,9 +270,9 @@ for phase_idx_0 in $(seq 0 $((NUM_PHASES - 1))); do
         >> "${OUTPUT_DIR}/logs/benchmark.log" 2>&1 || bench_status=$?
 
     if [ $bench_status -eq 0 ]; then
-        echo "Phase ${phase_idx} 完成 (concurrency=${concurrency}, prompts=${phase_prompts})"
+        echo "Phase ${phase_idx} done (concurrency=${concurrency}, prompts=${phase_prompts})"
     else
-        echo "Phase ${phase_idx} 失败 (concurrency=${concurrency}, exit=$bench_status)"
+        echo "Phase ${phase_idx} failed (concurrency=${concurrency}, exit=$bench_status)"
         overall_status=$bench_status
     fi
 done
@@ -280,10 +280,10 @@ done
 echo ""
 echo "========================================"
 if [ $overall_status -eq 0 ]; then
-    echo "实验完成!"
+    echo "Experiment finished!"
 else
-    echo "实验部分失败!"
+    echo "Experiment partially failed!"
 fi
 echo "========================================"
 echo ""
-echo "结果目录: $OUTPUT_DIR"
+echo "Output directory: $OUTPUT_DIR"

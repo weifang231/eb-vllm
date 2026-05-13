@@ -289,12 +289,12 @@ class Scheduler(SchedulerInterface):
             self.pd_p = 0.01
 
             # IFR (Increasing Failure Rate) mode parameters
-            # Used for online adaptive threshold selection (Algorithm 2)
+            # Used for online adaptive threshold selection (alg:adaptive_joint)
             # Must be initialized before k* mode selection below.
             # CFR (Constant Failure Rate) mode shares the same online
             # estimator state but pins η ≡ 0 and uses the exact-θ formula
-            # together with the midpoint construction (Algorithm 1 in the
-            # paper, alg:midpoint).
+            # together with the midpoint construction (alg:midpoint;
+            # journal-only).
             if self.pd_k_mode in ("ifr", "cfr"):
                 # Sliding window of output length samples for hazard
                 # rate estimation.  Keeps only the most recent W samples
@@ -347,7 +347,7 @@ class Scheduler(SchedulerInterface):
                 self.pd_k_ratio = self.pd_ifr_default_theta
                 self.pd_switch_threshold_k = self._compute_k_from_ratio()
             elif self.pd_k_mode == "cfr":
-                # CFR mode (Algorithm 1 / alg:midpoint).
+                # CFR mode (alg:midpoint; journal-only).
                 #
                 # Cold start: use IFR's default θ until enough samples accumulate
                 # to estimate p_0.  Once p_0 is estimated each update period,
@@ -987,7 +987,7 @@ class Scheduler(SchedulerInterface):
 
     def _compute_ifr_correction(self, theta_cfr: float) -> float:
         """
-        Compute IFR correction Δθ based on Proposition 3.
+        Compute IFR correction Δθ based on the IFR threshold theorem (thm:threshold_ifr).
 
         For linear increasing hazard rate h(t) = p_0 + η * t with η > 0,
         the optimal threshold admits:
@@ -1050,10 +1050,10 @@ class Scheduler(SchedulerInterface):
         """
         Compute optimal ratio θ* with IFR correction.
 
-        This implements Algorithm 1 (Adaptive Threshold Selection):
+        This implements the online adaptive threshold selection (alg:adaptive_joint):
         1. Estimate hazard rate parameters (p_0, η) from samples
         2. Compute CFR baseline θ*_CFR using Proposition 1
-        3. If η > 0, apply IFR correction from Proposition 3
+        3. If η > 0, apply IFR correction from the IFR threshold theorem (thm:threshold_ifr)
         4. Return θ* = min(θ*_CFR + Δθ, θ_max)
 
         Returns:
@@ -1092,7 +1092,7 @@ class Scheduler(SchedulerInterface):
 
     def _update_ifr_threshold(self) -> None:
         """
-        Online adaptive threshold update (Algorithm 2).
+        Online adaptive threshold update (alg:adaptive_joint).
 
         Called every M completions when window has >= W_min samples.
         Updates hazard rate parameters and recomputes θ*.
@@ -1356,7 +1356,7 @@ class Scheduler(SchedulerInterface):
         self.pd_batch_completed_count += 1
         self.pd_batch_total_output_tokens += output_tokens
 
-        # IFR mode: online adaptive update (Algorithm 2)
+        # IFR mode: online adaptive update (alg:adaptive_joint)
         if self.pd_k_mode == "ifr":
             # Append to sliding window (deque with maxlen auto-evicts)
             self.pd_ifr_samples.append(output_tokens)
@@ -1447,11 +1447,11 @@ class Scheduler(SchedulerInterface):
         self._last_param_update_us = _cold_path_elapsed
 
     # ================================================================
-    # THETA+ Adaptive Mode Selection (Algorithm 2 extension)
+    # EB+ Adaptive Mode Selection (alg:adaptive_joint extension)
     # ================================================================
 
     def _evaluate_mode_switch(self) -> None:
-        """Evaluate the Proposition 2 crossover condition and switch mode.
+        """Evaluate the EB-MB crossover condition (prop:comparison) and switch mode.
 
         Called every pd_param_update_interval completions from the cold path.
         Decision:

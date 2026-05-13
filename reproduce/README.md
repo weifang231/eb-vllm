@@ -34,6 +34,12 @@ scripts that reproduce every figure and table in the paper. Each
 See [`REPRODUCE.md`](REPRODUCE.md) for an annotated end-to-end recipe with
 expected runtimes on a reference 8×RTX PRO 6000 machine.
 
+## Reproduction status
+
+See [`REPRODUCTION_REPORT.md`](REPRODUCTION_REPORT.md) for per-figure
+reproducibility status (✅ / ⚠️ / ⛔), exact commands, and notes on how the
+implementation maps to the analytical statements in the paper.
+
 ## Notes
 
 - Plot scripts marked **(demo)** use synthetic illustrative data when no real

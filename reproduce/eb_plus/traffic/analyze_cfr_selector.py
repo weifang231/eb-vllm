@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 
 
-SCEN_ORDER = ("decode_heavy", "balanced", "prefill_heavy")
+SCEN_ORDER = ("decode_heavy", "balanced", "prefill_heavy", "table4")
 
 
 def load_pair(wd: Path, sched: str) -> dict | None:

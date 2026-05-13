@@ -376,7 +376,10 @@ run_experiment() {
     fi
 
     # 运行多轮对话 benchmark
-    python benchmarks/multi_turn/benchmark_serving_multi_turn_threaded.py \
+    # The threaded benchmark script imports bench_dataset / bench_utils from the
+    # same dir, so we cd in before invoking python.
+    local _bench_dir="${SCRIPT_DIR}/../../../benchmarks/multi_turn"
+    ( cd "$_bench_dir" && python benchmark_serving_multi_turn_threaded.py \
         --input-file "$DATASET_PATH" \
         --model "$MODEL" \
         --url "http://localhost:${port}" \
@@ -386,7 +389,7 @@ run_experiment() {
         --limit-max-tokens "$LIMIT_MAX_TOKENS" \
         --request-timeout-sec "$REQUEST_TIMEOUT" \
         --output-file "${result_dir}/${scheduler}_conversations.json" \
-        --metrics-file "${result_dir}/bench_${scheduler}.json" \
+        --metrics-file "${result_dir}/bench_${scheduler}.json" ) \
         > "$bench_log" 2>&1
     local bench_status=$?
 

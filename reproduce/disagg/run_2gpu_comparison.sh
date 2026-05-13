@@ -1,15 +1,15 @@
 #!/bin/bash
 
-# 2-GPU 公平对比: baseline(DP=2) vs pd_auto(DP=2) vs disagg(P/D分离)
+# 2-GPU fair comparison: baseline(DP=2) vs pd_auto(DP=2) vs disagg(P/D separation)
 #
-# 用法: ./run_2gpu_comparison.sh [GPU1] [GPU2]
+# Usage: ./run_2gpu_comparison.sh [GPU1] [GPU2]
 #
-# 环境变量:
-#   MODEL: 模型路径，默认 Qwen/Qwen3-8B
-#   MAX_CONCURRENCY: 并发数，默认 64
-#   NUM_PROMPTS: 请求数，默认 1000
-#   INPUT_LEN / OUTPUT_LEN: 固定 input/output 长度
-#   SKIP_DISAGG: 设为1跳过disagg (高并发下可能OOM)
+# Environment variables:
+#   MODEL: model path, default Qwen/Qwen3-8B
+#   MAX_CONCURRENCY: concurrency, default 64
+#   NUM_PROMPTS: number of requests, default 1000
+#   INPUT_LEN / OUTPUT_LEN: fixed input/output length
+#   SKIP_DISAGG: set to 1 to skip disagg (may OOM at high concurrency)
 
 set -e
 
@@ -36,11 +36,11 @@ mkdir -p "$OUTPUT_DIR/logs"
 
 init_experiment_env
 
-# 硬件校准
+# Hardware calibration
 ensure_calibration "$MODEL" "$MODEL_SHORT"
 
 echo "========================================"
-echo "2-GPU 公平对比 (concurrency=${MAX_CONCURRENCY})"
+echo "2-GPU fair comparison (concurrency=${MAX_CONCURRENCY})"
 echo "========================================"
 echo "  MODEL: $MODEL"
 echo "  GPUs: $GPU1, $GPU2"
@@ -49,7 +49,7 @@ echo "  INPUT_LEN: $INPUT_LEN, OUTPUT_LEN: $OUTPUT_LEN"
 echo ""
 
 # ========================================
-# 生成数据集
+# Generate dataset
 # ========================================
 DATASET="${OUTPUT_DIR}/synthetic.jsonl"
 python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
@@ -61,7 +61,7 @@ python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
     --output "$DATASET" \
     --seed 42
 
-# 公共 bench 参数
+# Common bench params
 bench_common=(
     --model "$MODEL"
     --dataset-name custom
@@ -82,7 +82,7 @@ if [ -n "${DTYPE:-}" ]; then
 fi
 
 # ========================================
-# 辅助函数
+# Helper functions
 # ========================================
 run_dp2_bench() {
     local scheduler=$1
@@ -92,12 +92,12 @@ run_dp2_bench() {
     echo ""
     echo "--- ${scheduler} (DP=2) ---"
 
-    # 清理
+    # Cleanup
     lsof -t -i:$PORT 2>/dev/null | xargs -r kill -9 2>/dev/null
     wait_for_gpu_memory $GPU1 60 || return 1
     wait_for_gpu_memory $GPU2 60 || return 1
 
-    # 设置环境变量
+    # Set environment variables
     local env_prefix="CUDA_VISIBLE_DEVICES=${GPU1},${GPU2}"
     case "$scheduler" in
         baseline)
@@ -114,7 +114,7 @@ run_dp2_bench() {
     local pid=$!
 
     if ! wait_for_server $PORT $pid 300 "$log_file"; then
-        echo "${scheduler} 启动失败"
+        echo "${scheduler} failed to start"
         kill_server $pid
         return 1
     fi
@@ -127,7 +127,7 @@ run_dp2_bench() {
 
     kill $pid 2>/dev/null; wait $pid 2>/dev/null
 
-    [ $status -eq 0 ] && echo "${scheduler} 完成" || echo "${scheduler} 失败 (exit=$status)"
+    [ $status -eq 0 ] && echo "${scheduler} done" || echo "${scheduler} failed (exit=$status)"
     return $status
 }
 
@@ -136,13 +136,13 @@ run_disagg_bench() {
     local log_dir="${OUTPUT_DIR}/logs"
 
     echo ""
-    echo "--- disagg (P/D分离) ---"
+    echo "--- disagg (P/D separation) ---"
 
     lsof -t -i:9000 -i:9100 -i:9200 -i:14579 -i:14580 2>/dev/null | xargs -r kill -9 2>/dev/null
     wait_for_gpu_memory $GPU1 60 || return 1
     wait_for_gpu_memory $GPU2 60 || return 1
 
-    # 清理 PD 调度器环境变量，避免影响 disagg
+    # Cleanup PD-scheduler env vars to avoid affecting disagg
     unset VLLM_PD_SCHEDULER_MODE VLLM_PD_K_MODE VLLM_PD_K_RATIO \
           VLLM_PD_CALIBRATION_FILE VLLM_USE_PD_SCHEDULER 2>/dev/null || true
 
@@ -163,12 +163,12 @@ run_disagg_bench() {
     local decode_pid=$!
 
     if ! wait_for_server 9100 $prefill_pid 300 "${log_dir}/disagg_prefill.log"; then
-        echo "disagg prefill 启动失败"
+        echo "disagg prefill failed to start"
         kill $prefill_pid $decode_pid 2>/dev/null
         return 1
     fi
     if ! wait_for_server 9200 $decode_pid 300 "${log_dir}/disagg_decode.log"; then
-        echo "disagg decode 启动失败"
+        echo "disagg decode failed to start"
         kill $prefill_pid $decode_pid 2>/dev/null
         return 1
     fi
@@ -181,11 +181,11 @@ run_disagg_bench() {
     local proxy_pid=$!
     sleep 3
 
-    # 验证 proxy
+    # Verify proxy
     if ! curl -s --max-time 60 http://localhost:9000/v1/completions \
         -H "Content-Type: application/json" \
         -d '{"model":"'"$MODEL"'","prompt":"test","max_tokens":1}' >/dev/null 2>&1; then
-        echo "disagg proxy 验证失败"
+        echo "disagg proxy verification failed"
         kill $proxy_pid $prefill_pid $decode_pid 2>/dev/null
         return 1
     fi
@@ -200,26 +200,26 @@ run_disagg_bench() {
     kill_server $prefill_pid $GPU1
     kill_server $decode_pid $GPU2
 
-    [ $status -eq 0 ] && echo "disagg 完成" || echo "disagg 失败 (exit=$status)"
+    [ $status -eq 0 ] && echo "disagg done" || echo "disagg failed (exit=$status)"
     return $status
 }
 
 # ========================================
-# 运行实验
+# Run experiments
 # ========================================
-run_dp2_bench "baseline" "bench_baseline.json" || echo "警告: baseline 失败"
-run_dp2_bench "pd_auto" "bench_pd_auto.json" || echo "警告: pd_auto 失败"
+run_dp2_bench "baseline" "bench_baseline.json" || echo "Warning: baseline failed"
+run_dp2_bench "pd_auto" "bench_pd_auto.json" || echo "Warning: pd_auto failed"
 
 if [ "$SKIP_DISAGG" != "1" ]; then
-    run_disagg_bench "bench_disagg.json" || echo "警告: disagg 失败"
+    run_disagg_bench "bench_disagg.json" || echo "Warning: disagg failed"
 fi
 
 # ========================================
-# 汇总结果
+# Summarize results
 # ========================================
 echo ""
 echo "========================================"
-echo "结果汇总 (concurrency=${MAX_CONCURRENCY}, ${NUM_PROMPTS} prompts)"
+echo "Result summary (concurrency=${MAX_CONCURRENCY}, ${NUM_PROMPTS} prompts)"
 echo "========================================"
 echo ""
 printf "%-15s %15s %15s %10s %10s\n" "Scheduler" "TotalThrput" "OutputThrput" "TTFT(ms)" "TPOT(ms)"
@@ -237,4 +237,4 @@ print(f'{name:<15s} {d[\"total_token_throughput\"]:15.2f} {d[\"output_throughput
 done
 
 echo ""
-echo "结果目录: $OUTPUT_DIR"
+echo "Output directory: $OUTPUT_DIR"

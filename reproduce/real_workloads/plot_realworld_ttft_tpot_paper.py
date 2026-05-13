@@ -11,8 +11,7 @@ This script preserves the styling decisions we iterated on:
 - Top row hides x tick labels (shared with bottom row).
 - Tuned subplot spacing (tighter vertical, wider horizontal).
 
-Default output matches the latest file:
-  /scratch/yuzhou/aproj/vllm/pd_exp/figures/realworld_ttft_tpot_bar_subtle_palette_star.pdf
+Default output: realworld_ttft_tpot_bar.pdf in the working directory.
 
 You can pass new data via --input-json. Expected JSON format:
 
@@ -352,10 +351,7 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=str,
-        default=(
-            "/scratch/yuzhou/aproj/vllm/pd_exp/figures/"
-            "realworld_ttft_tpot_bar_subtle_palette_star.pdf"
-        ),
+        default="realworld_ttft_tpot_bar.pdf",
         help="Output PDF path.",
     )
     parser.add_argument(

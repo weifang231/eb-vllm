@@ -1,35 +1,35 @@
 #!/bin/bash
 
-# Concurrency Shift 实验脚本
-# 验证 THETA 的 IFR 在线 controller 在并发突变时的行为:
-#   1. θ* 能在并发变化后快速收敛到新最优值
-#   2. 系统保持 memory-safe (无 OOM)
-#   3. 吞吐量能跟随并发变化
+# Concurrency Shift experiment script
+# Validates the IFR online controller under sudden concurrency shifts:
+#   1. theta* converges quickly to the new optimum after concurrency changes
+#   2. System remains memory-safe (no OOM)
+#   3. Throughput tracks concurrency changes
 #
-# 实验设计 (默认 3 phases):
-#   Phase 1: 低并发   (concurrency=32)
-#   Phase 2: 高并发   (concurrency=2048)
-#   Phase 3: 中并发   (concurrency=500)
-#   Server 保持运行，顺序发送不同并发的 benchmark
-#   对比: pd_ifr (自适应 θ*) vs pd_ratio (固定 θ*=0.8)
+# Experiment design (default 3 phases):
+#   Phase 1: low concurrency   (concurrency=32)
+#   Phase 2: high concurrency  (concurrency=2048)
+#   Phase 3: mid concurrency   (concurrency=500)
+#   Server stays up; benchmarks at different concurrencies are sent sequentially.
+#   Compare: pd_ifr (adaptive theta*) vs pd_ratio (fixed theta*=0.8)
 #
-# 用法: ./run_concurrency_shift.sh [GPU_ID]
+# Usage: ./run_concurrency_shift.sh [GPU_ID]
 #
-# 环境变量:
-#   MODEL: 模型路径，默认 Qwen/Qwen3-8B
-#   NUM_PROMPTS_PER_PHASE: 每个阶段的请求数，默认 2000
-#   CONCURRENCY_PHASES: 并发阶段，格式 "concurrency[:num_prompts],..."
-#                      例: "32:500,2048:4000,500:2000" 或 "32,2048,500" (用默认数量)
-#   INPUT_LEN: 固定 input 长度，默认 512
-#   OUTPUT_LEN: 固定 output 长度，默认 256
-#   IFR_WINDOW_SIZE: IFR 滑动窗口大小，默认 500
+# Environment variables:
+#   MODEL: model path, default Qwen/Qwen3-8B
+#   NUM_PROMPTS_PER_PHASE: requests per phase, default 2000
+#   CONCURRENCY_PHASES: concurrency phases, format "concurrency[:num_prompts],..."
+#                      e.g. "32:500,2048:4000,500:2000" or "32,2048,500" (default counts)
+#   INPUT_LEN: fixed input length, default 512
+#   OUTPUT_LEN: fixed output length, default 256
+#   IFR_WINDOW_SIZE: IFR sliding-window size, default 500
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../../common/common.sh"
 
-# 实验参数
+# Experiment parameters
 GPU_ID=${1:-0}
 MODEL=${MODEL:-"Qwen/Qwen3-8B"}
 MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
@@ -43,11 +43,11 @@ BASE_PORT=${BASE_PORT:-14000}
 IFR_WINDOW_SIZE=${IFR_WINDOW_SIZE:-500}
 SOURCE_DATASET=${SOURCE_DATASET:-"alpaca"}
 
-# 最优配置 (H200)
+# Optimal configuration (H200)
 TB=${TB:-18432}
 BS=${BS:-2048}
 
-# 解析并发阶段 (格式: concurrency[:num_prompts],...)
+# Parse concurrency phases (format: concurrency[:num_prompts],...)
 IFS=',' read -ra _RAW_PHASES <<< "$CONCURRENCY_PHASES"
 NUM_PHASES=${#_RAW_PHASES[@]}
 PHASE_CONCURRENCIES=()
@@ -66,21 +66,21 @@ for _p in "${_RAW_PHASES[@]}"; do
     [ "$local_n" -gt "$MAX_PHASE_PROMPTS" ] && MAX_PHASE_PROMPTS=$local_n
 done
 
-# 硬件校准文件 (不存在则自动运行校准)
+# Hardware calibration file (auto-runs calibration if missing).
 ensure_calibration "$MODEL" "$MODEL_SHORT"
 
-# 输出目录
+# Output directory
 OUTPUT_DIR="${SCRIPT_DIR}/../outputs/concurrency_shift_${MODEL_SHORT}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$OUTPUT_DIR/logs"
 
-# 初始化环境
+# Initialize environment
 init_experiment_env
 
 echo "========================================"
-echo "Concurrency Shift 实验 (${NUM_PHASES}-phase)"
+echo "Concurrency Shift experiment (${NUM_PHASES}-phase)"
 echo "========================================"
 echo ""
-echo "实验配置:"
+echo "Experiment configuration:"
 echo "  MODEL: $MODEL"
 echo "  GPU: $GPU_ID"
 echo "  TB: $TB, BS: $BS"
@@ -91,11 +91,11 @@ echo "  IFR_WINDOW_SIZE: $IFR_WINDOW_SIZE"
 echo ""
 
 # ========================================
-# Step 1: 生成统一分布的合成数据集
+# Step 1: generate a uniform-distribution synthetic dataset
 # ========================================
-# 每个 phase 复用同一批 prompts，只改变并发度
+# Each phase reuses the same prompts; only concurrency changes.
 SYNTHETIC_DATASET="${OUTPUT_DIR}/synthetic_uniform.jsonl"
-echo "生成合成数据集 (uniform: input~${INPUT_LEN}, output~${OUTPUT_LEN})..."
+echo "Generating synthetic dataset (uniform: input~${INPUT_LEN}, output~${OUTPUT_LEN})..."
 
 python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
     --model "$MODEL" \
@@ -107,9 +107,9 @@ python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
     --seed 42
 
 echo ""
-echo "数据集已生成: $SYNTHETIC_DATASET"
+echo "Dataset generated: $SYNTHETIC_DATASET"
 
-# 构建 concurrency phases JSON array
+# Build concurrency-phases JSON array
 PHASES_JSON=$(python3 -c "
 import json
 concurrencies = '${PHASE_CONCURRENCIES[*]}'.split()
@@ -118,7 +118,7 @@ result = [{'concurrency': int(c), 'num_prompts': int(n)} for c, n in zip(concurr
 print(json.dumps(result))
 ")
 
-# 保存实验配置
+# Save experiment configuration
 cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
 {
     "experiment_type": "concurrency_shift",
@@ -142,7 +142,7 @@ cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
 EOF
 
 # ========================================
-# Step 2: 运行实验
+# Step 2: run experiments
 # ========================================
 run_single_experiment() {
     local scheduler=$1
@@ -151,12 +151,12 @@ run_single_experiment() {
 
     echo ""
     echo "========================================"
-    echo "运行: ${scheduler}"
+    echo "Running: ${scheduler}"
     echo "========================================"
 
     : > "$log_file"
 
-    # 设置环境变量
+    # Set environment variables
     export CUDA_VISIBLE_DEVICES=$GPU_ID
     export VLLM_COLLECT_SCHEDULE_STATS=1
 
@@ -186,7 +186,7 @@ run_single_experiment() {
 
     wait_for_gpu_memory $GPU_ID 60 || return 1
 
-    # 启动服务 (整个实验期间保持运行)
+    # Launch server (kept up for the whole experiment)
     local dtype_arg=""
     if [ -n "${DTYPE:-}" ]; then
         dtype_arg="--dtype $DTYPE"
@@ -202,14 +202,14 @@ run_single_experiment() {
     local server_pid=$!
 
     if ! wait_for_server $port $server_pid 180 "$log_file"; then
-        echo "服务启动失败: ${scheduler}"
+        echo "Server failed to start: ${scheduler}"
         kill_server $server_pid $GPU_ID
         return 1
     fi
 
-    echo "服务已启动 (PID: $server_pid, port: $port)"
+    echo "Server up (PID: $server_pid, port: $port)"
 
-    # 顺序运行每个并发阶段 (server 保持运行，IFR 状态连续)
+    # Run each concurrency phase sequentially (server stays up, IFR state persists)
     local phase_idx=0
     local overall_status=0
 
@@ -240,9 +240,9 @@ run_single_experiment() {
             >> "$log_file" 2>&1 || bench_status=$?
 
         if [ $bench_status -eq 0 ]; then
-            echo "Phase ${phase_idx} 完成 (concurrency=${concurrency}, prompts=${phase_prompts})"
+            echo "Phase ${phase_idx} done (concurrency=${concurrency}, prompts=${phase_prompts})"
         else
-            echo "Phase ${phase_idx} 失败 (concurrency=${concurrency}, exit=$bench_status)"
+            echo "Phase ${phase_idx} failed (concurrency=${concurrency}, exit=$bench_status)"
             overall_status=$bench_status
         fi
     done
@@ -250,29 +250,29 @@ run_single_experiment() {
     kill_server $server_pid $GPU_ID
 
     if [ $overall_status -eq 0 ]; then
-        echo "完成: ${scheduler}"
+        echo "Done: ${scheduler}"
     else
-        echo "部分失败: ${scheduler}"
+        echo "Partial failure: ${scheduler}"
     fi
 
     return $overall_status
 }
 
-# 运行指定的 scheduler (可通过 SCHEDULERS 环境变量控制)
-# 例: SCHEDULERS="baseline,pd_auto" bash run_concurrency_shift.sh 0
+# Run the requested schedulers (controlled via the SCHEDULERS env var)
+# Example: SCHEDULERS="baseline,pd_auto" bash run_concurrency_shift.sh 0
 DEFAULT_SCHEDULERS="baseline,pd_ifr,pd_ratio,pd_auto"
 IFS=',' read -ra SCHEDULER_LIST <<< "${SCHEDULERS:-$DEFAULT_SCHEDULERS}"
 for sched in "${SCHEDULER_LIST[@]}"; do
     sched=$(echo "$sched" | tr -d ' ')
-    run_single_experiment "$sched" || echo "警告: ${sched} 实验失败 (exit=$?)"
+    run_single_experiment "$sched" || echo "Warning: ${sched} experiment failed (exit=$?)"
 done
 
 echo ""
 echo "========================================"
-echo "实验完成!"
+echo "Experiment finished!"
 echo "========================================"
 echo ""
-echo "结果目录: $OUTPUT_DIR"
+echo "Output directory: $OUTPUT_DIR"
 echo ""
-echo "运行分析脚本:"
+echo "Run the analysis script:"
 echo "  python reproduce/eb_plus/non_stationary/plot_distribution_shift.py $OUTPUT_DIR"
