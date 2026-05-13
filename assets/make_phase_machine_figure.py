@@ -69,12 +69,7 @@ ax.axhline(N - k_hat, color="#666", linewidth=1.0, linestyle="--", zorder=1)
 # Trajectory
 ax.plot(ts, ys, color="#1f4e79", linewidth=2.4, zorder=3)
 
-# Y-axis annotations: N and N-k̂*
 xmax = ts[-1]
-ax.text(-xmax * 0.012, N, r"$N$", fontsize=14, ha="right", va="center",
-        color="#222", fontweight="bold")
-ax.text(-xmax * 0.012, N - k_hat, r"$N - \hat{k}^*$", fontsize=13, ha="right",
-        va="center", color="#222", fontweight="bold")
 
 # Side arrow + label showing the drop is k̂*
 # Position arrow in the first decode region
@@ -106,7 +101,10 @@ for i, (t0, t1, kind) in enumerate(phases[2:], start=2):
 ax.set_xlim(-xmax * 0.05, xmax * 1.02)
 ax.set_ylim(N - k_hat - 12, N + 17)
 ax.set_xticks([])         # time axis is illustrative; drop tick numbers
-ax.set_yticks([])         # bracketed by N and N-k̂* labels
+# Y-ticks at the two reference levels (renders OUTSIDE plot area)
+ax.set_yticks([N - k_hat, N])
+ax.set_yticklabels([r"$N - \hat{k}^*$", r"$N$"], fontsize=14,
+                    fontweight="bold")
 ax.set_xlabel("Time (iterations)", fontsize=11.5)
 ax.set_ylabel("# decoding requests in batch", fontsize=11.5)
 
