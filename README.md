@@ -116,7 +116,7 @@ This separation eliminates the prefill–decode bandwidth contention that limits
 
 Three closed-form derivations from the paper drive the controller:
 
-1. **Phase-switching threshold (Prop. 1, Thm. 2):** k\*/N converges to a closed-form root of θ/(1−θ) + ln(1−θ) = p₀α\_p/α\_d, with an O(η) correction for hazard-rate slope. Solved by bisection in `_compute_optimal_ratio` / `_compute_optimal_ratio_ifr`.
+1. **Phase-switching threshold (Prop. 1, Thm. 2):** $k^*/N \to \theta^* = \theta_0 + \Delta\theta + O(\eta^2)$, where the CFR base $\theta_0$ solves $\theta_0 / (1 - \theta_0) + \ln(1 - \theta_0) = p_0 \alpha_p / \alpha_d$ (Prop. 1) and $\Delta\theta$ is the $O(\eta)$ IFR correction (Thm. 2). Solved by bisection in `_compute_optimal_ratio` / `_compute_optimal_ratio_ifr`.
 2. **Memory-safe batch size (Prop. 3):** $\hat{N}^* = \lfloor (C - \nu\ln(1/\epsilon))/D(\theta) \rfloor$ with $\nu = 1/(p_0^2 \mu_L)$, ensuring OOM probability ≤ ε. Implemented in `_compute_memory_safe_n` (using an asymptotically equivalent CLT-type refinement that is tighter at moderate $N$; see the in-file docstring at `scheduler.py:780`).
 3. **EB–MB crossover (Prop. 4):** the sign of a single scalar Δ(N) determines which strategy wins; computed in `_compute_diagnostic_delta`.
 
