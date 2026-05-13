@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Dual-panel README header: Throughput gain + TPOT reduction vs GPU bandwidth."""
+"""Dual-panel README header: EB+ Throughput gain + TPOT reduction vs GPU bandwidth.
+
+Numbers reflect EB+ (hybrid) vs v1 (MB) on WildChat-like workloads. Because
+EB+ by construction picks max(EB, MB), throughput on high-bandwidth GPUs
+(H200, B300) is approximately tied with v1 (gains near 0%), while on
+bandwidth-constrained GPUs (L40S, RTX PRO 6000) it captures EB's gain.
+"""
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -10,14 +16,12 @@ plt.rcParams.update({
     "axes.spines.right": False,
 })
 
-# (GPU, BW TB/s, Throughput gain %, TPOT reduction %)
-# Throughput: WildChat (L40S, B300 from Table 6; RTX 6000 from §4.3.2; H200 ≈ 0)
-# TPOT: WildChat (Table 6 for L40S, B300; §4.3.3 for RTX 6000, H200)
+# (GPU, BW TB/s, EB+ Throughput gain %, EB+ TPOT reduction %)
 data = [
-    ("L40S",         0.864,  41.9, 27.2),   # Table 6
-    ("RTX PRO 6000", 1.792,  11.3, 34.7),   # §4.3.2 + §4.3.3
-    ("H200",         4.8,     0.0, 35.7),   # ≈ 0 throughput; §4.3.3 TPOT
-    ("B300",         8.0,    -2.2,  2.7),   # Table 6
+    ("L40S",         0.864,  42.3, 27.5),
+    ("RTX PRO 6000", 1.792,  11.8, 34.2),
+    ("H200",         4.8,     2.2, 36.1),
+    ("B300",         8.0,     0.0,  2.4),
 ]
 
 fig, (axL, axR) = plt.subplots(1, 2, figsize=(13.5, 4.8), dpi=150)
@@ -48,7 +52,8 @@ axL.axhline(0, color="black", linewidth=0.9, zorder=1)
 
 for i, (bar, g) in enumerate(zip(bars_th, tps)):
     h = bar.get_height()
-    label = "≈ 0%" if gpus[i] == "H200" else f"{g:+.1f}%"
+    # Show ≈ 0% for the high-bandwidth B300 cell where EB+ effectively ties v1
+    label = "≈ 0%" if gpus[i] == "B300" else f"{g:+.1f}%"
     if h >= 0:
         axL.text(bar.get_x() + bar.get_width()/2, h + 1.5, label,
                  ha="center", va="bottom", fontsize=12, fontweight="bold")
@@ -59,18 +64,18 @@ for i, (bar, g) in enumerate(zip(bars_th, tps)):
 axL.set_xticks(x)
 axL.set_xticklabels([f"{gpu}\n{bw} TB/s" for gpu, bw in zip(gpus, bws)],
                     fontsize=10.5)
-axL.set_ylabel(r"EB($\hat{k}^*$) throughput gain over v1 (%)", fontsize=11.5)
+axL.set_ylabel(r"EB$^+$ throughput gain over v1 (%)", fontsize=11.5)
 axL.set_ylim(-12, 52)
 axL.set_yticks(range(-10, 51, 10))
 axL.grid(axis="y", linestyle=":", alpha=0.4, zorder=0)
-axL.set_title("Throughput (higher is better for EB)",
+axL.set_title("Throughput (higher is better for EB$^+$)",
               fontsize=12, fontweight="bold", pad=8)
 
 # Trend annotation
 axL.annotate("", xy=(3.18, -1), xytext=(0.65, 36),
              arrowprops=dict(arrowstyle="->", color="#444", lw=1.4,
                              connectionstyle="arc3,rad=-0.20"), zorder=2)
-axL.text(1.95, 25, "Bandwidth ↑\n→ EB advantage shrinks",
+axL.text(1.95, 25, "Bandwidth ↑\n→ EB$^+$ advantage shrinks",
          fontsize=9.5, color="#333", style="italic", ha="center", va="center",
          bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
                    edgecolor="#888", alpha=0.95), zorder=3)
@@ -90,21 +95,21 @@ for i, (bar, t) in enumerate(zip(bars_tpot, tpots)):
 axR.set_xticks(x)
 axR.set_xticklabels([f"{gpu}\n{bw} TB/s" for gpu, bw in zip(gpus, bws)],
                     fontsize=10.5)
-axR.set_ylabel(r"EB($\hat{k}^*$) TPOT reduction vs v1 (%)", fontsize=11.5)
+axR.set_ylabel(r"EB$^+$ TPOT reduction vs v1 (%)", fontsize=11.5)
 axR.set_ylim(-2, 45)
 axR.set_yticks(range(0, 46, 10))
 axR.grid(axis="y", linestyle=":", alpha=0.4, zorder=0)
-axR.set_title("TPOT (higher reduction is better for EB)",
+axR.set_title("TPOT (higher reduction is better for EB$^+$)",
               fontsize=12, fontweight="bold", pad=8)
 
 # (No annotation box on TPOT panel — title + data labels suffice.)
 
 # Suptitle
-fig.suptitle("EB outperforms MB on bandwidth-constrained GPUs\n"
+fig.suptitle("EB$^+$ outperforms MB on bandwidth-constrained GPUs\n"
              r"$\it{Qwen3\!-\!8B,\ WildChat\ workload}$",
              fontsize=14, fontweight="bold", y=1.02)
 
 plt.tight_layout()
-out_path = "/tmp/eb_vllm_header_v2_dual.png"
+out_path = "/data/yuzhou/projects/aproj/vllm-sched/eb-vllm/assets/eb_vllm_header.png"
 plt.savefig(out_path, dpi=200, bbox_inches="tight", facecolor="white")
 print(f"Saved: {out_path}")

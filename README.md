@@ -19,17 +19,19 @@ Mixed batching (MB) — interleaving prefill and decode in the same iteration �
 * **EB(k̂\*)** — exclusive batching with an *asymptotically optimal*, online-calibrated phase-switching threshold k̂\* and memory-safe batch size N̂\*.
 * **EB⁺** — a hybrid scheduler that applies the crossover condition online to switch between EB and MB; **matches or exceeds v1 (MB) in every tested scenario (worst case: −0.4%).**
 
-### 📊 Headline results (Qwen3-8B, real workloads)
+### 📊 Headline results (Qwen3-8B, WildChat workload)
+
+EB⁺ vs vLLM v1 (MB) — EB⁺ adaptively picks the better of {EB, MB} per regime:
 
 | Hardware | Throughput vs v1 (MB) | TPOT vs v1 (MB) |
 |---|---|---|
-| L40S (0.864 TB/s) | EB(k̂\*) **+41.9%** | EB(k̂\*) **−27.2%** |
-| RTX PRO 6000 (1.792 TB/s) | EB(k̂\*) **+11.3%** (up to +15.3% on ShareGPT) | EB(k̂\*) **−34.7%** |
-| H200 (4.8 TB/s) | EB(k̂\*) ≈ v1 | EB(k̂\*) **−35.7%** on decode-heavy |
-| B300 (8.0 TB/s) | EB(k̂\*) −2.2% | EB(k̂\*) **−2.7%** |
-| Non-stationary traffic (RTX PRO 6000) | EB⁺ **+37.5%** (distribution shift) | EB⁺ **−43%** (distribution shift) |
+| L40S (0.864 TB/s) | **+42.3%** | **−27.5%** |
+| RTX PRO 6000 (1.792 TB/s) | **+11.8%** | **−34.2%** |
+| H200 (4.8 TB/s) | **+2.2%** | **−36.1%** |
+| B300 (8.0 TB/s) | ≈ 0% | **−2.4%** |
+| Non-stationary traffic (RTX PRO 6000) | **+37.5%** (distribution shift) | **−43%** (distribution shift) |
 
-Source: paper §4.3 (real workloads), §4.4 (EB⁺), §4.5.1 (scalability across GPUs).
+Source: paper §4.3–§4.5. EB⁺ recovers the underlying EB(k̂\*) gains on bandwidth-constrained GPUs (L40S, RTX PRO 6000) and falls back to MB-equivalent throughput on high-bandwidth GPUs (H200, B300).
 
 ---
 
