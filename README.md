@@ -117,7 +117,7 @@ This separation eliminates the prefill–decode bandwidth contention that limits
 Three closed-form derivations from the paper drive the controller:
 
 1. **Phase-switching threshold (Prop. 1, Thm. 2):** k\*/N converges to a closed-form root of θ/(1−θ) + ln(1−θ) = p₀α\_p/α\_d, with an O(η) correction for hazard-rate slope. Solved by bisection in `_compute_optimal_ratio` / `_compute_optimal_ratio_ifr`.
-2. **Memory-safe batch size (Prop. 3):** N̂\* satisfies a CLT-type concentration $N\cdot D(\theta) + \sigma(\theta)\sqrt{N\ln(1/\epsilon)} \le C$, ensuring OOM probability ≤ ε. Solved in closed form in `_compute_memory_safe_n`.
+2. **Memory-safe batch size (Prop. 3):** $\hat{N}^* = \lfloor (C - \nu\ln(1/\epsilon))/D(\theta) \rfloor$ with $\nu = 1/(p_0^2 \mu_L)$, ensuring OOM probability ≤ ε. Implemented in `_compute_memory_safe_n` (using an asymptotically equivalent CLT-type refinement that is tighter at moderate $N$; see the in-file docstring at `scheduler.py:780`).
 3. **EB–MB crossover (Prop. 4):** the sign of a single scalar Δ(N) determines which strategy wins; computed in `_compute_diagnostic_delta`.
 
 The full online controller (`_update_params_online`) runs in two paths: a **hot path** (per-request, pure integer arithmetic) and a **cold path** (every M completions, computes EMA / hazard-rate fit / θ\* update). See [`vllm/v1/core/sched/scheduler.py`](vllm/v1/core/sched/scheduler.py) for the implementation.
