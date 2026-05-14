@@ -94,7 +94,7 @@ echo ""
 SYNTHETIC_DATASET="${OUTPUT_DIR}/synthetic_uniform.jsonl"
 echo "Generating synthetic dataset (uniform: input~${INPUT_LEN}, output~${OUTPUT_LEN})..."
 
-python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
+python3 "${SCRIPT_DIR}/../eb_plus/non_stationary/generate_distribution_shift_dataset.py" \
     --model "$MODEL" \
     --num-prompts-per-phase "$MAX_PHASE_PROMPTS" \
     --phases "${INPUT_LEN}:${OUTPUT_LEN}" \

@@ -1,12 +1,12 @@
 #!/bin/bash
 
-# 多轮对话 Benchmark 脚本 (Prefix Cache 测试)
-# 对比 baseline 和 PD scheduler 在多轮对话场景下的性能
+# Multi-turn conversation benchmark script (prefix cache test)
+# Compares baseline and PD scheduler on multi-turn workloads
 #
-# 用法: ./run_benchmark.sh <DATASET_PATH> [MAX_GPUS]
+# Usage: ./run_benchmark.sh <DATASET_PATH> [MAX_GPUS]
 #
-# 示例:
-#   # 先导出数据集
+# Example:
+#   # First export the dataset
 #   python pd_exp/multiturn/export_dataset.py \
 #       --dataset wildchat \
 #       --model Qwen/Qwen3-8B \
@@ -14,7 +14,7 @@
 #       --min-turns 8 \
 #       --output ./outputs/wildchat_multiturn.json
 #
-#   # 运行实验
+#   # Run the experiment
 #   ./reproduce/real_workloads/multiturn/run_benchmark.sh ./outputs/wildchat_multiturn.json 4
 
 set -e
@@ -30,14 +30,14 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-# 检查参数
+# Check arguments
 if [ -z "${1:-}" ]; then
-    echo "用法: $0 <DATASET_PATH> [MAX_GPUS]"
+    echo "Usage: $0 <DATASET_PATH> [MAX_GPUS]"
     echo ""
-    echo "必须提供数据集文件路径 (JSON 格式，多轮对话)"
+    echo "Dataset file path is required (JSON format, multi-turn)"
     echo ""
-    echo "示例:"
-    echo "  # 先导出数据集"
+    echo "Example:"
+    echo "  # First export the dataset"
     echo "  python pd_exp/multiturn/export_dataset.py \\"
     echo "      --dataset wildchat \\"
     echo "      --model Qwen/Qwen3-8B \\"
@@ -45,7 +45,7 @@ if [ -z "${1:-}" ]; then
     echo "      --min-turns 8 \\"
     echo "      --output ./outputs/wildchat_multiturn.json"
     echo ""
-    echo "  # 运行实验"
+    echo "  # Run the experiment"
     echo "  $0 ./outputs/wildchat_multiturn.json 4"
     exit 1
 fi
@@ -53,24 +53,29 @@ fi
 DATASET_PATH="$1"
 MAX_GPUS=${2:-4}
 
-# 检查数据集文件
+# Check dataset file
 if [ ! -f "$DATASET_PATH" ]; then
-    echo "错误: 数据集文件不存在: $DATASET_PATH"
+    echo "Error: dataset file not found: $DATASET_PATH"
     exit 1
 fi
+
+# Absolute-ize the dataset path now, so any later `cd` (e.g. into
+# benchmarks/multi_turn/ to satisfy bench_dataset imports) does not break
+# relative-path lookups against the caller's cwd.
+DATASET_PATH="$(cd "$(dirname "$DATASET_PATH")" && pwd)/$(basename "$DATASET_PATH")"
 
 if [[ "$DATASET_PATH" != *.json ]]; then
-    echo "错误: 数据集文件必须是 JSON 格式 (.json)"
-    echo "请使用 pd_exp/multiturn/export_dataset.py 导出数据集"
+    echo "Error: dataset file must be JSON format (.json)"
+    echo "Please use pd_exp/multiturn/export_dataset.py to export the dataset"
     exit 1
 fi
 
-# 获取数据集名称（用于输出目录）
+# Get dataset name (used for output directory)
 DATASET_NAME=$(basename "$DATASET_PATH" .json)
 
-# 实验参数
+# Experiment parameters
 MODEL=${MODEL:-"Qwen/Qwen3-8B"}
-# 模型短名称（用于目录命名，将 / 替换为 _）
+# Model short name (used for directory naming; replaces / with _)
 MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
 NUM_CLIENTS=${NUM_CLIENTS:-2048}
 MAX_TURNS=${MAX_TURNS:-12}
@@ -79,26 +84,26 @@ REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
 BASE_PORT=${BASE_PORT:-10000}
 K_RATIO=${K_RATIO:-0.8}
 
-# 硬件校准文件 (必须，按模型区分)
+# Hardware calibration file (required, per-model)
 if [ -z "${VLLM_PD_CALIBRATION_FILE:-}" ]; then
     DEFAULT_CALIBRATION="${SCRIPT_DIR}/../outputs/pd_calibration_${MODEL_SHORT}.json"
     if [ -f "$DEFAULT_CALIBRATION" ]; then
         export VLLM_PD_CALIBRATION_FILE="$DEFAULT_CALIBRATION"
     else
-        echo "错误: 未找到硬件校准文件!"
+        echo "Error: hardware calibration file not found!"
         echo ""
-        echo "PD Scheduler 需要硬件校准参数才能准确调度。"
-        echo "请先运行校准:"
+        echo "PD Scheduler requires hardware calibration parameters for accurate scheduling."
+        echo "Please first run calibration:"
         echo "  python -m vllm.v1.core.sched.calibration --model ${MODEL} --output ${DEFAULT_CALIBRATION}"
         echo ""
-        echo "校准文件默认保存到: ${DEFAULT_CALIBRATION}"
-        echo "或手动指定: VLLM_PD_CALIBRATION_FILE=/path/to/file.json $0 ..."
+        echo "Calibration file is saved by default to: ${DEFAULT_CALIBRATION}"
+        echo "Or specify manually: VLLM_PD_CALIBRATION_FILE=/path/to/file.json $0 ..."
         exit 1
     fi
 fi
-echo "使用校准文件: $VLLM_PD_CALIBRATION_FILE"
+echo "Using calibration file: $VLLM_PD_CALIBRATION_FILE"
 
-# 从校准文件中读取 alpha/beta 参数
+# Read alpha/beta parameters from calibration file
 if [ -f "$VLLM_PD_CALIBRATION_FILE" ]; then
     ALPHA_P=$(python3 -c "import json; print(json.load(open('$VLLM_PD_CALIBRATION_FILE'))['alpha_p'])" 2>/dev/null || echo "null")
     BETA_P=$(python3 -c "import json; print(json.load(open('$VLLM_PD_CALIBRATION_FILE'))['beta_p'])" 2>/dev/null || echo "null")
@@ -113,26 +118,26 @@ else
     BETA_D="null"
 fi
 
-# 网格搜索参数
+# Grid search parameters
 BS_VALUES=(${BS_VALUES:-256 512 1024 1536 2048})
 TB_VALUES=(${TB_VALUES:-4096 8192 10240 14336 16384 18432})
 
-# 输出目录 (包含模型名)
+# Output directory (includes model name)
 OUTPUT_DIR="${SCRIPT_DIR}/../outputs/multiturn_${DATASET_NAME}_${MODEL_SHORT}_Clients_${NUM_CLIENTS}_MaxTurns_${MAX_TURNS}"
 mkdir -p "$OUTPUT_DIR"
 
-# 初始化环境
+# Initialize environment
 init_experiment_env
 
 echo "========================================"
-echo "多轮对话 Benchmark (Prefix Cache 测试)"
+echo "Multi-turn benchmark (prefix cache test)"
 echo "========================================"
 
-# 检测并选择 GPU
+# Detect and select GPUs
 select_gpus $MAX_GPUS
 
 echo ""
-echo "实验配置:"
+echo "Experiment configuration:"
 echo "  DATASET: $DATASET_PATH"
 echo "  MODEL: $MODEL"
 echo "  DTYPE: ${DTYPE:-auto}"
@@ -142,18 +147,18 @@ echo "  LIMIT_MAX_TOKENS: $LIMIT_MAX_TOKENS"
 echo "  K_RATIO (for pd_ratio): $K_RATIO"
 echo "  BS_VALUES: ${BS_VALUES[*]}"
 echo "  TB_VALUES: ${TB_VALUES[*]}"
-# 支持通过 SCHEDULERS 环境变量指定要运行的调度器
+# Supports specifying which schedulers to run via the SCHEDULERS env var
 SCHEDULERS=${SCHEDULERS:-"baseline pd_ratio pd_ifr"}
 echo "  SCHEDULERS: $SCHEDULERS"
-echo "  CALIBRATION_FILE: ${VLLM_PD_CALIBRATION_FILE:-"(未设置)"}"
+echo "  CALIBRATION_FILE: ${VLLM_PD_CALIBRATION_FILE:-"(not set)"}"
 echo ""
 
-# 生成实验队列
+# Generate experiment queue
 QUEUE_FILE="${OUTPUT_DIR}/experiment_queue.txt"
 RESUME=${RESUME:-false}
 
 if [ "$RESUME" = "true" ] && [ -f "$QUEUE_FILE" ] && [ -s "$QUEUE_FILE" ]; then
-    echo "恢复模式: 使用现有队列文件 ($QUEUE_FILE)"
+    echo "Resume mode: using existing queue file ($QUEUE_FILE)"
     TOTAL_EXPERIMENTS=$(wc -l < "$QUEUE_FILE")
 else
     > "$QUEUE_FILE"
@@ -167,10 +172,10 @@ else
     TOTAL_EXPERIMENTS=$(wc -l < "$QUEUE_FILE")
 fi
 
-echo "总实验数: $TOTAL_EXPERIMENTS"
+echo "Total experiments: $TOTAL_EXPERIMENTS"
 echo ""
 
-# 保存全局配置
+# Save global configuration
 cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
 {
     "dataset_path": "${DATASET_PATH}",
@@ -203,7 +208,7 @@ cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
 }
 EOF
 
-# Python 脚本: 从 benchmark 输出中提取并保存 metrics
+# Python script: extract metrics from benchmark output and save
 extract_metrics_script() {
     cat << 'PYTHON_SCRIPT'
 import sys
@@ -212,14 +217,14 @@ import re
 from pathlib import Path
 
 def extract_metrics(bench_log_path, output_path, duration_sec):
-    """从 benchmark 日志中提取 metrics 并保存为 JSON"""
+    """Extract metrics from benchmark log and save as JSON."""
     metrics = {}
 
     with open(bench_log_path, 'r') as f:
         content = f.read()
 
-    # 解析 pandas describe() 输出
-    # 格式: metric_name  count  mean  std  min  25%  50%  75%  90%  99%  max
+    # Parse pandas describe() output
+    # Format: metric_name  count  mean  std  min  25%  50%  75%  90%  99%  max
     lines = content.strip().split('\n')
     for line in lines:
         parts = line.split()
@@ -248,7 +253,7 @@ def extract_metrics(bench_log_path, output_path, duration_sec):
                 except (ValueError, IndexError):
                     pass
 
-    # 计算 throughput
+    # Compute throughput
     if 'count_latency_ms' in metrics and duration_sec > 0:
         completed = metrics['count_latency_ms']
         metrics['request_throughput'] = completed / duration_sec
@@ -257,7 +262,7 @@ def extract_metrics(bench_log_path, output_path, duration_sec):
             total_output_tokens = completed * metrics['mean_output_num_tokens']
             metrics['output_throughput'] = total_output_tokens / duration_sec
 
-    # 重命名以匹配 vllm bench serve 格式
+    # Rename to match vllm bench serve format
     rename_map = {
         'mean_ttft_ms': 'mean_ttft_ms',
         'median_ttft_ms': 'median_ttft_ms',
@@ -275,19 +280,19 @@ def extract_metrics(bench_log_path, output_path, duration_sec):
         if old_key in metrics:
             result[new_key] = metrics[old_key]
 
-    # 添加 throughput
+    # Add throughput
     if 'request_throughput' in metrics:
         result['request_throughput'] = metrics['request_throughput']
     if 'output_throughput' in metrics:
         result['output_throughput'] = metrics['output_throughput']
 
-    # 添加其他有用的 metrics
+    # Add other useful metrics
     for key in ['mean_input_num_tokens', 'mean_output_num_tokens',
                 'mean_input_num_turns', 'count_latency_ms']:
         if key in metrics:
             result[key] = metrics[key]
 
-    # 保存
+    # Save
     with open(output_path, 'w') as f:
         json.dump(result, f, indent=2)
 
@@ -307,7 +312,7 @@ if __name__ == '__main__':
 PYTHON_SCRIPT
 }
 
-# 运行单个实验
+# Run a single experiment
 run_experiment() {
     local gpu_id=$1 scheduler=$2 bs=$3 tb=$4
     local port=$((BASE_PORT + gpu_id))
@@ -316,9 +321,9 @@ run_experiment() {
     local bench_log="${result_dir}/logs/${scheduler}_bench.log"
     local result_file="${result_dir}/bench_${scheduler}.json"
 
-    # 检查是否跳过已有结果
+    # Skip if result already exists
     if [ "${SKIP_EXISTING:-1}" = "1" ] && [ -f "$result_file" ]; then
-        echo "[GPU $gpu_id] 跳过: ${scheduler} tb=${tb} bs=${bs} (结果已存在)"
+        echo "[GPU $gpu_id] Skip: ${scheduler} tb=${tb} bs=${bs} (result exists)"
         return 0
     fi
 
@@ -328,9 +333,9 @@ run_experiment() {
 
     check_port_available $port $gpu_id || return 1
 
-    echo "[GPU $gpu_id] 开始: ${scheduler} tb=${tb} bs=${bs}"
+    echo "[GPU $gpu_id] Starting: ${scheduler} tb=${tb} bs=${bs}"
 
-    # 设置环境变量
+    # Set environment variables
     export CUDA_VISIBLE_DEVICES=$gpu_id
     export VLLM_COLLECT_SCHEDULE_STATS=1
 
@@ -354,7 +359,7 @@ run_experiment() {
 
     wait_for_gpu_memory $gpu_id 60 || return 1
 
-    # 启动服务
+    # Start the server
     local dtype_arg=""
     if [ -n "${DTYPE:-}" ]; then
         dtype_arg="--dtype $DTYPE"
@@ -370,12 +375,12 @@ run_experiment() {
     local server_pid=$!
 
     if ! wait_for_server $port $server_pid 180 "$log_file"; then
-        echo "[GPU $gpu_id] 服务启动失败"
+        echo "[GPU $gpu_id] Server failed to start"
         kill_server $server_pid $gpu_id
         return 1
     fi
 
-    # 运行多轮对话 benchmark
+    # Run multi-turn benchmark
     # The threaded benchmark script imports bench_dataset / bench_utils from the
     # same dir, so we cd in before invoking python.
     local _bench_dir="${SCRIPT_DIR}/../../../benchmarks/multi_turn"
@@ -396,15 +401,15 @@ run_experiment() {
     kill_server $server_pid $gpu_id
 
     if [ $bench_status -eq 0 ]; then
-        echo "[GPU $gpu_id] 完成: ${scheduler} tb=${tb} bs=${bs}"
+        echo "[GPU $gpu_id] Done: ${scheduler} tb=${tb} bs=${bs}"
     else
-        echo "[GPU $gpu_id] 失败: ${scheduler} tb=${tb} bs=${bs}"
+        echo "[GPU $gpu_id] Failed: ${scheduler} tb=${tb} bs=${bs}"
     fi
 
     return $bench_status
 }
 
-# 并行调度
+# Parallel scheduling
 PROGRESS_FILE="${OUTPUT_DIR}/progress.txt"
 LOCK_FILE="${OUTPUT_DIR}/.queue.lock"
 
@@ -425,8 +430,8 @@ gpu_worker() {
     done
 }
 
-# 主流程
-echo "开始并行执行..."
+# Main flow
+echo "Starting parallel execution..."
 echo "========================================"
 
 > "$PROGRESS_FILE"
@@ -434,12 +439,12 @@ echo "========================================"
 for gpu_id in "${GPUS_TO_USE[@]}"; do
     gpu_worker "$gpu_id" &
     WORKER_PIDS+=($!)
-    echo "启动 GPU $gpu_id worker (PID: ${WORKER_PIDS[-1]})"
+    echo "Launched GPU $gpu_id worker (PID: ${WORKER_PIDS[-1]})"
     sleep 10
 done
 
 echo ""
-echo "监控进度: watch -n 5 'wc -l ${PROGRESS_FILE}'"
+echo "Monitor progress: watch -n 5 'wc -l ${PROGRESS_FILE}'"
 echo ""
 
 for pid in "${WORKER_PIDS[@]}"; do
@@ -449,11 +454,11 @@ done
 print_summary "$PROGRESS_FILE" "$TOTAL_EXPERIMENTS" "$OUTPUT_DIR"
 echo ""
 echo "========================================"
-echo "实验完成!"
+echo "Experiments completed!"
 echo "========================================"
 echo ""
-echo "结果目录: $OUTPUT_DIR"
+echo "Result directory: $OUTPUT_DIR"
 echo ""
-echo "运行分析脚本:"
-echo "  # 结果分析 (scheduler 对比)"
+echo "Run analysis scripts:"
+echo "  # Result analysis (scheduler comparison)"
 echo "  python ${SCRIPT_DIR}/analyze_results.py $OUTPUT_DIR"

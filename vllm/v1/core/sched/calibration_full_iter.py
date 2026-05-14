@@ -61,7 +61,7 @@ class HardwareParams:
     device_name: str = ""
     dtype: str = "float16"
     timestamp: str = ""
-    measurement_type: str = "full_iteration"  # 标识这是 full iteration 版本
+    measurement_type: str = "full_iteration"  # marks this as the full-iteration variant
 
     # Fitting quality metrics
     prefill_r2: float = 0.0  # R² score for prefill fit
@@ -266,30 +266,30 @@ class HardwareCalibratorFullIter:
         """
         assert self.engine_core is not None
 
-        # ========== 计时开始：包含整个 iteration ==========
+        # ========== Begin timing: covers the entire iteration ==========
         timer = GPUTimer()
         timer.start()
 
-        # 1. 调度
+        # 1. Schedule
         scheduler_output = self.engine_core.scheduler.schedule()
         if scheduler_output.total_num_scheduled_tokens == 0:
             elapsed = timer.stop()
             return 0, 0, 0, elapsed
 
-        # 2. 执行模型
+        # 2. Execute model
         model_output = self.engine_core.model_executor.execute_model(
             scheduler_output, non_block=False
         )
         if model_output is None:
             model_output = self.engine_core.model_executor.sample_tokens(None)
 
-        # 3. 更新调度器状态
+        # 3. Update scheduler state
         self.engine_core.scheduler.update_from_output(scheduler_output, model_output)
 
-        # ========== 计时结束 ==========
+        # ========== End timing ==========
         elapsed = timer.stop()
 
-        # 统计 decode/prefill 数量
+        # Count decode / prefill batch sizes
         num_decode = 0
         num_prefill = 0
         for req_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
@@ -401,7 +401,7 @@ class HardwareCalibratorFullIter:
                     self.engine_core.step_fn()
                 self._cleanup_all_requests()
 
-                # Actual measurement - 使用 full iteration 版本
+                # Actual measurement - use the full-iteration variant
                 self._add_request(prefill_size, max_tokens=1)
                 num_d, num_p, total_tokens, elapsed = self._run_single_step_full_iter()
 
@@ -435,7 +435,7 @@ class HardwareCalibratorFullIter:
                     logger.warning(f"  Could not prepare {num_decode} decode requests")
                     break
 
-                # 使用 full iteration 版本
+                # Use the full-iteration variant
                 num_d, num_p, total_tokens, elapsed = self._run_single_step_full_iter()
 
                 if i >= self.num_warmup and num_d > 0:
@@ -621,7 +621,7 @@ def main():
         default=0.9,
         help="GPU memory utilization (default: 0.9)",
     )
-    # 默认输出到 pd_exp/outputs/pd_calibration_full_iter.json
+    # Default output is pd_exp/outputs/pd_calibration_full_iter.json
     default_output = Path(__file__).parent.parent.parent.parent.parent / "pd_exp" / "outputs" / "pd_calibration_full_iter.json"
     parser.add_argument(
         "--output", "-o",

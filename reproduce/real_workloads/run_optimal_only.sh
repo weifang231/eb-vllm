@@ -1,0 +1,356 @@
+#!/bin/bash
+#
+# Run only the paper-appendix-reported optimal (B, N) per scheduler on a
+# single real-workload dataset.  Saves ~30x compute vs. run_grid_search.sh,
+# which sweeps a 5x6=30 (B, N) grid per scheduler.
+#
+# (B, N) values are taken from Appendix Table tab:optimal-config-h200 (H200,
+# Qwen3-8B) of the camera-ready paper.  The mapping between paper schedulers
+# and the script's --VLLM_PD_K_MODE choices is:
+#     baseline  <-  v1   (vLLM default; VLLM_USE_PD_SCHEDULER=0)
+#     pd_ifr    <-  EB(k_hat^*)  (adaptive theta*, IFR mode)
+#     pd_ratio                   (CFR with fixed theta*=K_RATIO; not in paper)
+#
+# The paper does not report a pd_ratio-specific optimum, so pd_ratio reuses
+# pd_ifr's (B, N) since both are EB variants and (B, N) is robust within EB.
+#
+# Usage:
+#   ./run_optimal_only.sh <DATASET_PATH> [MAX_GPUS]
+#
+# Workload auto-detected from dataset basename:
+#   sharegpt_*       -> sharegpt
+#   longbench_*      -> longbench
+#   wildchat_*       -> wildchat        (single-turn export; see also multiturn/)
+#   numina_math_*    -> numina_math
+# Override via WORKLOAD env var.
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/../common/common.sh"
+# common_cfr.sh provides resolve_calibration + detect_gpu_name (per-GPU
+# calibration lookup) which we want even for non-CFR runs.
+source "${SCRIPT_DIR}/../common/common_cfr.sh"
+
+WORKER_PIDS=()
+cleanup() {
+    for pid in "${WORKER_PIDS[@]}"; do
+        kill -TERM "$pid" 2>/dev/null || true
+    done
+}
+trap cleanup EXIT INT TERM HUP
+
+if [ -z "${1:-}" ]; then
+    echo "Usage: $0 <DATASET_PATH> [MAX_GPUS]"
+    echo
+    echo "Example:"
+    echo "  $0 ./reproduce/outputs/numina_math_prompts.jsonl 3"
+    echo
+    echo "Optimal (B, N) per (workload, scheduler) on H200 + Qwen3-8B"
+    echo "from Appendix Table tab:optimal-config-h200."
+    exit 1
+fi
+
+DATASET_PATH="$1"
+MAX_GPUS=${2:-3}
+
+if [ ! -f "$DATASET_PATH" ]; then
+    echo "Error: dataset file not found: $DATASET_PATH"
+    exit 1
+fi
+if [[ "$DATASET_PATH" != *.jsonl ]]; then
+    echo "Error: dataset must be JSONL (.jsonl). Use export_dataset.py first."
+    exit 1
+fi
+
+DATASET_NAME=$(basename "$DATASET_PATH" .jsonl)
+
+# Auto-detect workload from dataset filename unless WORKLOAD is set.
+if [ -z "${WORKLOAD:-}" ]; then
+    case "$DATASET_NAME" in
+        sharegpt*)    WORKLOAD=sharegpt ;;
+        longbench*)   WORKLOAD=longbench ;;
+        wildchat*)    WORKLOAD=wildchat ;;
+        numina*)      WORKLOAD=numina_math ;;
+        *)            echo "Error: cannot auto-detect workload from '$DATASET_NAME'."
+                      echo "Set WORKLOAD=sharegpt|longbench|wildchat|numina_math."
+                      exit 1 ;;
+    esac
+fi
+
+# ---------------------------------------------------------------------------
+# Per-(GPU, workload, scheduler) (B, N) lookup, from paper Appendix Tables
+# tab:optimal-config-h200 and tab:optimal-config-a6000 (Qwen3-8B).
+# Values: "B,N". GPU_TAG is set by detect_gpu_name (H200 / RTXPRO6000 / ...).
+#
+# Scheduler -> paper-vocab mapping (see evaluation.tex §4.3.1):
+#   baseline = v1 (vLLM default mixed batching)
+#   pd_ratio = v0 (exclusive batching, EB(k=1) under heavy traffic)
+#   pd_ifr   = EB(k_hat^*) (adaptive threshold from this paper)
+# ---------------------------------------------------------------------------
+lookup_bn() {
+    local workload=$1 scheduler=$2
+    local gpu_key="${GPU_TAG:-H200}"
+    case "${gpu_key}:${workload}:${scheduler}" in
+        # ===== H200, Qwen3-8B =====
+        # ShareGPT
+        H200:sharegpt:baseline)        echo "10240,1024" ;;  # v1
+        H200:sharegpt:pd_ratio)        echo "18432,2048" ;;  # v0
+        H200:sharegpt:pd_ifr)          echo "16384,1536" ;;  # EB(k_hat^*)
+
+        # LongBench
+        H200:longbench:baseline)       echo "14336,256"  ;;  # v1
+        H200:longbench:pd_ratio)       echo "18432,256"  ;;  # v0
+        H200:longbench:pd_ifr)         echo "14336,2048" ;;  # EB(k_hat^*)
+
+        # WildChat
+        H200:wildchat:baseline)        echo "4096,2048"  ;;  # v1
+        H200:wildchat:pd_ratio)        echo "18432,1536" ;;  # v0
+        H200:wildchat:pd_ifr)          echo "16384,1024" ;;  # EB(k_hat^*)
+
+        # NuminaMath
+        H200:numina_math:baseline)     echo "14336,256"  ;;  # v1
+        H200:numina_math:pd_ratio)     echo "10240,256"  ;;  # v0
+        H200:numina_math:pd_ifr)       echo "18432,256"  ;;  # EB(k_hat^*)
+
+        # ===== RTX PRO 6000, Qwen3-8B =====
+        # ShareGPT
+        RTXPRO6000:sharegpt:baseline)        echo "16384,1536" ;;  # v1
+        RTXPRO6000:sharegpt:pd_ratio)        echo "14336,1536" ;;  # v0
+        RTXPRO6000:sharegpt:pd_ifr)          echo "14336,1536" ;;  # EB(k_hat^*)
+
+        # LongBench
+        RTXPRO6000:longbench:baseline)       echo "10240,1024" ;;  # v1
+        RTXPRO6000:longbench:pd_ratio)       echo "16384,512"  ;;  # v0
+        RTXPRO6000:longbench:pd_ifr)         echo "16384,512"  ;;  # EB(k_hat^*)
+
+        # WildChat
+        RTXPRO6000:wildchat:baseline)        echo "18432,1024" ;;  # v1
+        RTXPRO6000:wildchat:pd_ratio)        echo "18432,1024" ;;  # v0
+        RTXPRO6000:wildchat:pd_ifr)          echo "10240,1024" ;;  # EB(k_hat^*)
+
+        # NuminaMath
+        RTXPRO6000:numina_math:baseline)     echo "14336,256"  ;;  # v1
+        RTXPRO6000:numina_math:pd_ratio)     echo "8192,256"   ;;  # v0
+        RTXPRO6000:numina_math:pd_ifr)       echo "4096,256"   ;;  # EB(k_hat^*)
+
+        *)
+            echo "Error: no (B,N) entry for GPU=$gpu_key workload=$workload scheduler=$scheduler" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Experiment parameters (must match run_grid_search.sh defaults so analysis
+# scripts can compare apples to apples).
+MODEL=${MODEL:-"Qwen/Qwen3-8B"}
+MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
+NUM_PROMPTS=${NUM_PROMPTS:-4000}
+MAX_CONCURRENCY=${MAX_CONCURRENCY:-2048}
+NUM_WARMUP_REQUESTS=${NUM_WARMUP_REQUESTS:-20}
+K_RATIO=${K_RATIO:-0.8}
+BASE_PORT=${BASE_PORT:-11000}
+CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-4000}
+ENABLE_THINKING=${ENABLE_THINKING:-true}
+
+# Hardware calibration file (required by pd_ratio / pd_ifr). Auto-resolve
+# the per-GPU file via the common helper used by §4.2 / §4.4 scripts.
+detect_gpu_name
+resolve_calibration "$MODEL"
+read_calibration_params
+echo "Calibration: $VLLM_PD_CALIBRATION_FILE"
+
+# Output dir is parallel to run_grid_search's, but with an "optimal_only"
+# prefix so analysis scripts can pick whichever is preferred.
+OUTPUT_DIR="${SCRIPT_DIR}/../outputs/optimal_only_${DATASET_NAME}_${MODEL_SHORT}_Con_${MAX_CONCURRENCY}_Prompts_${NUM_PROMPTS}"
+mkdir -p "$OUTPUT_DIR"
+
+init_experiment_env
+select_gpus "$MAX_GPUS"
+
+# pd_ratio (the script's CFR / fixed-theta* variant) is skipped by default
+# because this repo only releases v1 vs EB(k_hat^*).  Paper Table v0 numbers
+# were obtained on a separate vLLM build and are not reproduced here.  Add
+# pd_ratio back via:  SCHEDULERS="baseline pd_ratio pd_ifr" ./run_optimal_only.sh ...
+SCHEDULERS=${SCHEDULERS:-"baseline pd_ifr"}
+
+echo "========================================"
+echo "Optimal-config-only run (no grid search)"
+echo "========================================"
+echo "  WORKLOAD: $WORKLOAD"
+echo "  DATASET: $DATASET_PATH"
+echo "  MODEL: $MODEL"
+echo "  NUM_PROMPTS: $NUM_PROMPTS"
+echo "  MAX_CONCURRENCY: $MAX_CONCURRENCY"
+echo "  CUSTOM_OUTPUT_LEN: $CUSTOM_OUTPUT_LEN"
+echo "  ENABLE_THINKING: $ENABLE_THINKING"
+echo "  SCHEDULERS: $SCHEDULERS"
+echo "  OUTPUT: $OUTPUT_DIR"
+echo
+echo "(B, N) per scheduler [from Appendix tab:optimal-config-h200]:"
+for sched in $SCHEDULERS; do
+    bn=$(lookup_bn "$WORKLOAD" "$sched") || { echo "  $sched: NO ENTRY for workload=$WORKLOAD"; exit 1; }
+    echo "  $sched: B=${bn%,*}, N=${bn#*,}"
+done
+echo
+
+QUEUE_FILE="${OUTPUT_DIR}/experiment_queue.txt"
+> "$QUEUE_FILE"
+for sched in $SCHEDULERS; do
+    bn=$(lookup_bn "$WORKLOAD" "$sched") || exit 1
+    bs=${bn#*,}
+    tb=${bn%,*}
+    echo "${sched}|${bs}|${tb}" >> "$QUEUE_FILE"
+done
+TOTAL_EXPERIMENTS=$(wc -l < "$QUEUE_FILE")
+
+cat > "${OUTPUT_DIR}/experiment_config.json" <<EOF
+{
+    "experiment_type": "optimal_only",
+    "workload": "${WORKLOAD}",
+    "dataset_path": "${DATASET_PATH}",
+    "dataset_name": "${DATASET_NAME}",
+    "model": "${MODEL}",
+    "num_prompts": ${NUM_PROMPTS},
+    "max_concurrency": ${MAX_CONCURRENCY},
+    "custom_output_len": ${CUSTOM_OUTPUT_LEN},
+    "enable_thinking": ${ENABLE_THINKING},
+    "k_ratio": ${K_RATIO},
+    "schedulers": [$(echo "$SCHEDULERS" | sed 's/[^ ]*/"&"/g' | sed 's/ /, /g')],
+    "calibration_file": "${VLLM_PD_CALIBRATION_FILE}",
+    "calibration_params": {
+        "alpha_p": ${ALPHA_P}, "beta_p": ${BETA_P},
+        "alpha_d": ${ALPHA_D}, "beta_d": ${BETA_D}
+    },
+    "gpus_used": [$(IFS=,; echo "${GPUS_TO_USE[*]}")],
+    "total_experiments": ${TOTAL_EXPERIMENTS},
+    "timestamp": "$(date -Iseconds)"
+}
+EOF
+
+run_experiment() {
+    local gpu_id=$1 scheduler=$2 bs=$3 tb=$4
+    local port=$((BASE_PORT + gpu_id))
+    local result_dir="${OUTPUT_DIR}/tb${tb}/bs${bs}"
+    local log_file="${result_dir}/logs/${scheduler}.log"
+    local result_file="${result_dir}/bench_${scheduler}.json"
+
+    if [ "${SKIP_EXISTING:-1}" = "1" ] && [ -f "$result_file" ]; then
+        echo "[GPU $gpu_id] SKIP ${scheduler} tb=${tb} bs=${bs}"
+        return 0
+    fi
+
+    mkdir -p "${result_dir}/logs"
+    : > "$log_file"
+    check_port_available "$port" "$gpu_id" || return 1
+
+    echo "[GPU $gpu_id] START ${scheduler} tb=${tb} bs=${bs}"
+
+    export CUDA_VISIBLE_DEVICES=$gpu_id
+    export VLLM_COLLECT_SCHEDULE_STATS=1
+
+    case "$scheduler" in
+        baseline)
+            export VLLM_USE_PD_SCHEDULER=0
+            unset VLLM_PD_K_MODE VLLM_PD_K_STAR VLLM_PD_K_RATIO
+            ;;
+        pd_ratio)
+            export VLLM_USE_PD_SCHEDULER=1
+            export VLLM_PD_K_MODE=ratio
+            export VLLM_PD_K_RATIO=$K_RATIO
+            unset VLLM_PD_K_STAR
+            ;;
+        pd_ifr)
+            export VLLM_USE_PD_SCHEDULER=1
+            export VLLM_PD_K_MODE=ifr
+            unset VLLM_PD_K_RATIO VLLM_PD_K_STAR
+            ;;
+    esac
+
+    wait_for_gpu_memory "$gpu_id" 60 || return 1
+
+    local dtype_arg=""
+    if [ -n "${DTYPE:-}" ]; then
+        dtype_arg="--dtype $DTYPE"
+    fi
+
+    VLLM_SCHEDULE_STATS_FILE="${result_dir}/${scheduler}_stats.json" \
+    vllm serve "$MODEL" \
+        --port "$port" \
+        --gpu-memory-utilization 0.9 \
+        --max-num-seqs "$bs" \
+        --max-num-batched-tokens "$tb" \
+        $dtype_arg >> "$log_file" 2>&1 &
+    local server_pid=$!
+
+    if ! wait_for_server "$port" "$server_pid" 240 "$log_file"; then
+        echo "[GPU $gpu_id] FAIL: server didn't start"
+        kill_server "$server_pid" "$gpu_id"
+        return 1
+    fi
+
+    local bench_cmd=(
+        vllm bench serve
+        --model "$MODEL"
+        --base-url "http://localhost:${port}"
+        --dataset-name custom
+        --dataset-path "$DATASET_PATH"
+        --custom-output-len "$CUSTOM_OUTPUT_LEN"
+        --num-prompts "$NUM_PROMPTS"
+        --num-warmups "$NUM_WARMUP_REQUESTS"
+        --request-rate inf
+        --max-concurrency "$MAX_CONCURRENCY"
+        --save-result
+        --save-detailed
+        --result-dir "${result_dir}"
+        --result-filename "bench_${scheduler}.json"
+    )
+    if [ "$ENABLE_THINKING" = "false" ]; then
+        bench_cmd+=(--backend openai-chat)
+        bench_cmd+=(--endpoint /v1/chat/completions)
+        bench_cmd+=(--extra-body '{"chat_template_kwargs":{"enable_thinking":false}}')
+    fi
+
+    "${bench_cmd[@]}" >> "$log_file" 2>&1
+    local bench_status=$?
+
+    kill_server "$server_pid" "$gpu_id"
+
+    if [ $bench_status -eq 0 ]; then
+        echo "[GPU $gpu_id] DONE  ${scheduler} tb=${tb} bs=${bs}"
+    else
+        echo "[GPU $gpu_id] FAIL  ${scheduler} tb=${tb} bs=${bs}"
+    fi
+    return $bench_status
+}
+
+PROGRESS_FILE="${OUTPUT_DIR}/progress.txt"
+LOCK_FILE="${OUTPUT_DIR}/.queue.lock"
+> "$PROGRESS_FILE"
+
+gpu_worker() {
+    local gpu_id=$1
+    while true; do
+        local exp
+        exp=$(get_next_experiment "$QUEUE_FILE" "$LOCK_FILE")
+        [ -z "$exp" ] && break
+        IFS='|' read -r scheduler bs tb <<< "$exp"
+        if run_experiment "$gpu_id" "$scheduler" "$bs" "$tb"; then
+            update_progress "OK|${exp}" "$PROGRESS_FILE" "$LOCK_FILE" "$TOTAL_EXPERIMENTS"
+        else
+            update_progress "FAIL|${exp}" "$PROGRESS_FILE" "$LOCK_FILE" "$TOTAL_EXPERIMENTS"
+        fi
+    done
+}
+
+for gpu_id in "${GPUS_TO_USE[@]}"; do
+    gpu_worker "$gpu_id" &
+    WORKER_PIDS+=($!)
+    sleep 10
+done
+for pid in "${WORKER_PIDS[@]}"; do wait "$pid" || true; done
+
+print_summary "$PROGRESS_FILE" "$TOTAL_EXPERIMENTS" "$OUTPUT_DIR"
+echo
+echo "Analyse with:"
+echo "  python ${SCRIPT_DIR}/analyze_grid_search.py ${OUTPUT_DIR}"

@@ -128,7 +128,7 @@ The full online controller (`_update_params_online`) runs in two paths: a **hot 
 
 ## 🧪 Reproducing the paper
 
-See [`reproduce/REPRODUCTION_REPORT.md`](reproduce/REPRODUCTION_REPORT.md) for the per-figure status table (✅ / ⚠️ / ⛔) and exact commands.
+See [`reproduce/REPRODUCTION_REPORT.md`](reproduce/REPRODUCTION_REPORT.md) for the per-figure reproduction commands and expected results.
 
 | Paper section | Subdirectory |
 |---|---|

@@ -1,22 +1,22 @@
 #!/bin/bash
-# 公共函数库 - 被实验脚本 source 使用
+# Common helper library — sourced by experiment scripts.
 
 GPU_MEM_THRESHOLD=${GPU_MEM_THRESHOLD:-10000}
 
-# 选择要使用的 GPU
-# 参数: $1 = MAX_GPUS
-# 环境变量: GPUS = 指定GPU列表 (如 "0,1,2")
-# 输出: 设置 GPUS_TO_USE 数组
+# Select which GPUs to use.
+# Args:    $1 = MAX_GPUS
+# Env:     GPUS = explicit GPU list (e.g. "0,1,2")
+# Output:  sets the GPUS_TO_USE array
 select_gpus() {
     local max_gpus=${1:-4}
 
     if [ -n "${GPUS:-}" ]; then
         IFS=',' read -ra GPUS_TO_USE <<< "$GPUS"
-        echo "使用指定的 GPU: ${GPUS_TO_USE[*]}"
+        echo "Using user-specified GPUs: ${GPUS_TO_USE[*]}"
         return
     fi
 
-    # 自动检测可用 GPU (内存使用低于阈值)
+    # Auto-detect available GPUs (memory usage below threshold)
     local available=()
     while IFS=, read -r gpu_id _ _ mem_used; do
         gpu_id=$(echo "$gpu_id" | tr -d ' ')
@@ -24,22 +24,22 @@ select_gpus() {
         [ "$mem_used" -lt "$GPU_MEM_THRESHOLD" ] && available+=("$gpu_id")
     done < <(nvidia-smi --query-gpu=index,name,memory.total,memory.used --format=csv,noheader 2>/dev/null)
 
-    [ ${#available[@]} -eq 0 ] && { echo "错误: 没有可用的 GPU"; exit 1; }
+    [ ${#available[@]} -eq 0 ] && { echo "Error: no GPU available"; exit 1; }
 
     GPUS_TO_USE=("${available[@]:0:$max_gpus}")
-    echo "使用 ${#GPUS_TO_USE[@]} 张 GPU: ${GPUS_TO_USE[*]}"
+    echo "Using ${#GPUS_TO_USE[@]} GPU(s): ${GPUS_TO_USE[*]}"
 }
 
-# 检查端口是否可用 (只检查 LISTEN 状态，避免 TIME_WAIT/ESTABLISHED 误判)
+# Check whether a port is free (only LISTEN state; avoid TIME_WAIT / ESTABLISHED false positives)
 check_port_available() {
     local port=$1 gpu_id=${2:-""}
     if lsof -nP -iTCP:$port -sTCP:LISTEN >/dev/null 2>&1; then
-        echo "[GPU $gpu_id] 端口 $port 被占用"
+        echo "[GPU $gpu_id] port $port is in use"
         return 1
     fi
 }
 
-# 使用 Python 真正尝试 bind 来判断端口是否可用（不依赖 lsof 权限）
+# Probe port availability by actually attempting bind() in Python (no lsof permissions needed)
 port_is_free() {
     local port=$1
     python - "$port" <<'PY'
@@ -56,7 +56,7 @@ finally:
 PY
 }
 
-# 从起始端口开始查找可用端口
+# Walk from start_port to find the first free port
 find_free_port() {
     local start_port=$1
     local max_tries=${2:-50}
@@ -73,7 +73,7 @@ find_free_port() {
     return 1
 }
 
-# 等待 GPU 内存释放
+# Wait for GPU memory to be released
 wait_for_gpu_memory() {
     local gpu_id=$1 max_wait=${2:-30} i=0
     while [ $i -lt $max_wait ]; do
@@ -84,51 +84,51 @@ wait_for_gpu_memory() {
     return 1
 }
 
-# 等待服务启动
+# Wait for the server to come up
 wait_for_server() {
     local port=$1 server_pid=$2 max_wait=${3:-180} log_file=${4:-""} i=0
     while [ $i -lt $max_wait ]; do
         curl -s "http://localhost:${port}/health" >/dev/null 2>&1 && return 0
         if ! kill -0 $server_pid 2>/dev/null; then
-            echo "服务进程意外退出"
+            echo "Server process exited unexpectedly"
             [ -n "$log_file" ] && [ -f "$log_file" ] && sed 's/^/  /' "$log_file"
             return 1
         fi
         sleep 1; ((i++))
     done
-    echo "服务启动超时 (${max_wait}s)"
+    echo "Server startup timed out (${max_wait}s)"
     [ -n "$log_file" ] && [ -f "$log_file" ] && sed 's/^/  /' "$log_file"
     return 1
 }
 
-# 终止服务进程
+# Terminate a server process
 kill_server() {
     local server_pid=$1 gpu_id=${2:-""}
-    local max_wait=${3:-15}  # 默认等待 15 秒让服务优雅退出
+    local max_wait=${3:-15}  # default 15 s for graceful shutdown
 
-    # 优雅终止 - 给服务足够时间保存 stats 等清理工作
+    # Graceful TERM — give the server time to flush stats etc.
     kill -TERM $server_pid 2>/dev/null || true
 
-    # 等待进程自然退出
+    # Wait for natural exit
     local i=0
     while [ $i -lt $max_wait ]; do
         if ! kill -0 $server_pid 2>/dev/null; then
-            # 进程已退出
+            # Process exited
             break
         fi
         sleep 1
         ((i++))
     done
 
-    # 如果进程还在运行，强制终止
+    # If still alive, force kill
     if kill -0 $server_pid 2>/dev/null; then
-        echo "进程 $server_pid 未响应 SIGTERM，强制终止..."
+        echo "Process $server_pid did not respond to SIGTERM, forcing..."
         kill -9 $server_pid 2>/dev/null || true
-        # 杀死服务进程的子进程
+        # Also kill child processes
         pkill -9 -P $server_pid 2>/dev/null || true
     fi
 
-    # 清理GPU上的残留进程
+    # Clean up any GPU-resident processes left behind
     if [ -n "$gpu_id" ]; then
         for pid in $(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i $gpu_id 2>/dev/null | tr -d ' '); do
             [ -n "$pid" ] && kill -9 $pid 2>/dev/null || true
@@ -139,7 +139,7 @@ kill_server() {
     fi
 }
 
-# 从队列获取下一个实验 (带锁)
+# Pop the next experiment from the queue (lock-protected)
 get_next_experiment() {
     local queue_file=$1 lock_file=$2
     (
@@ -153,20 +153,20 @@ get_next_experiment() {
     ) 200>"$lock_file"
 }
 
-# 更新进度
+# Append a status line and print progress
 update_progress() {
     local status=$1 progress_file=$2 lock_file=$3 total=$4
     (
         flock -x 200
         echo "$status" >> "$progress_file"
         local done=$(wc -l < "$progress_file")
-        echo "进度: $done / $total"
+        echo "Progress: $done / $total"
     ) 200>"$lock_file"
 }
 
-# 确保硬件校准文件存在，不存在则自动运行校准
-# 用法: ensure_calibration <model> <model_short>
-# 结果: 设置 VLLM_PD_CALIBRATION_FILE 环境变量
+# Ensure a hardware calibration file exists; run calibration if not.
+# Usage:  ensure_calibration <model> <model_short>
+# Effect: exports VLLM_PD_CALIBRATION_FILE
 ensure_calibration() {
     local model=$1 model_short=$2
     local _common_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -176,7 +176,7 @@ ensure_calibration() {
         if [ -f "$VLLM_PD_CALIBRATION_FILE" ]; then
             return 0
         else
-            echo "错误: 指定的校准文件不存在: $VLLM_PD_CALIBRATION_FILE"
+            echo "Error: specified calibration file does not exist: $VLLM_PD_CALIBRATION_FILE"
             return 1
         fi
     fi
@@ -187,16 +187,16 @@ ensure_calibration() {
         return 0
     fi
 
-    echo "未找到校准文件，自动运行硬件校准..."
+    echo "Calibration file not found; running hardware calibration..."
     mkdir -p "$calibration_dir"
     python3 -m vllm.v1.core.sched.calibration \
         --model "$model" \
         --output "$calibration_file" || return 1
     export VLLM_PD_CALIBRATION_FILE="$calibration_file"
-    echo "校准完成: $calibration_file"
+    echo "Calibration done: $calibration_file"
 }
 
-# 初始化实验环境
+# Initialize the experiment environment (venv, ulimit, etc.)
 init_experiment_env() {
     # common.sh is at reproduce/common/common.sh; repo root is ../.. (eb-vllm/).
     local _common_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -211,7 +211,7 @@ init_experiment_env() {
     fi
 }
 
-# 打印实验结果统计
+# Print final summary stats
 print_summary() {
     local progress_file=$1 total=$2 output_dir=$3
     local done=$(wc -l < "$progress_file" 2>/dev/null || echo 0)
@@ -220,7 +220,7 @@ print_summary() {
 
     echo ""
     echo "========================================"
-    echo "实验完成: $done / $total (成功: $ok, 失败: $fail)"
-    echo "结果目录: $output_dir"
+    echo "Experiment done: $done / $total (ok: $ok, fail: $fail)"
+    echo "Output directory: $output_dir"
     echo "========================================"
 }

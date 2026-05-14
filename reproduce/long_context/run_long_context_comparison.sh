@@ -52,7 +52,8 @@ echo ""
 # Generate dataset
 # ========================================
 DATASET="${OUTPUT_DIR}/synthetic.jsonl"
-python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
+# Generator lives under reproduce/eb_plus/non_stationary/; this script reuses it.
+python3 "${SCRIPT_DIR}/../eb_plus/non_stationary/generate_distribution_shift_dataset.py" \
     --model "$MODEL" \
     --num-prompts-per-phase "$NUM_PROMPTS" \
     --phases "${INPUT_LEN}:${OUTPUT_LEN}" \

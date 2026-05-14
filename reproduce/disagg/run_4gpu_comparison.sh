@@ -60,7 +60,7 @@ echo ""
 # Generate dataset
 # ========================================
 DATASET="${OUTPUT_DIR}/synthetic.jsonl"
-python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
+python3 "${SCRIPT_DIR}/../eb_plus/non_stationary/generate_distribution_shift_dataset.py" \
     --model "$MODEL" \
     --num-prompts-per-phase "$NUM_PROMPTS" \
     --phases "${INPUT_LEN}:${OUTPUT_LEN}" \

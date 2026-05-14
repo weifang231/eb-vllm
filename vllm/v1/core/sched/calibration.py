@@ -627,7 +627,7 @@ def main():
 
     args = parser.parse_args()
 
-    # 默认输出路径按模型区分
+    # Default output path is keyed by model short name
     if args.output is None:
         model_short = args.model.split("/")[-1]
         default_output = Path(__file__).parent.parent.parent.parent.parent / "pd_exp" / "outputs" / f"pd_calibration_{model_short}.json"

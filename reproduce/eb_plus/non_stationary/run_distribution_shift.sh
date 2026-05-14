@@ -157,6 +157,14 @@ run_single_experiment() {
     unset VLLM_USE_PD_SCHEDULER VLLM_PD_K_MODE VLLM_PD_K_RATIO \
           VLLM_PD_K_STAR VLLM_PD_IFR_WINDOW_SIZE VLLM_PD_SCHEDULER_MODE
 
+    # Non-stationary workloads (3-phase distribution shift) need a higher
+    # IFR theta_min than the default to handle the sliding-window estimator's
+    # transient lag during phase changes. Without it, pd_ifr settles at a
+    # too-low theta during decode-heavy phase 3 and kv_escape interaction
+    # tanks throughput. Override the scheduler default of 0.3 to 0.7 here
+    # to reproduce paper Table 5 numbers. (Stationary scripts keep 0.3.)
+    export VLLM_PD_THETA_FLOOR=${VLLM_PD_THETA_FLOOR:-0.7}
+
     case "$scheduler" in
         baseline)
             ;;

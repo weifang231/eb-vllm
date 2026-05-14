@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-分析 multi-turn benchmark 的 TB × BS 网格搜索实验结果
+Analyze TB × BS grid search results from multi-turn benchmarks.
 
-用法:
+Usage:
     python pd_exp/multiturn/analyze_results.py <experiment_dir>
 
-输出:
-    - grid_summary.json: 完整数据汇总
-    - heatmap_{metric}.png: 热力图
-    - optimal_comparison.png: 最优配置对比图
-    - analysis_report.txt: 文本分析报告
+Outputs:
+    - grid_summary.json: full data summary
+    - heatmap_{metric}.png: heatmap
+    - optimal_comparison.png: optimal configuration comparison plot
+    - analysis_report.txt: text analysis report
 """
 
 import json
@@ -23,44 +23,44 @@ try:
     HAS_MATPLOTLIB = True
 except ImportError:
     HAS_MATPLOTLIB = False
-    print("警告: matplotlib 未安装，跳过绑图")
+    print("Warning: matplotlib not installed, skipping plots")
 
 
 def load_bench_result(filepath: Path) -> Optional[Dict]:
-    """加载 benchmark 结果文件
+    """Load a benchmark result file.
 
-    对于大文件（10MB+），只读取前 100KB 和后 100KB 来提取关键指标，
-    避免加载整个文件到内存。
+    For large files (10MB+), only the first 100KB and last 100KB are read to
+    extract key metrics, avoiding loading the whole file into memory.
 
-    注意：vLLM benchmark JSON 文件结构为：
-    - 开头包含：吞吐量指标、completed、failed 等
-    - 结尾包含：TTFT、TPOT、ITL 等延迟指标
+    Note: vLLM benchmark JSON file structure:
+    - Head contains: throughput metrics, completed, failed, etc.
+    - Tail contains: TTFT, TPOT, ITL and other latency metrics
     """
     if not filepath.exists():
         return None
     try:
         file_size = filepath.stat().st_size
 
-        # 小文件直接加载
+        # Small files: load directly
         if file_size < 10 * 1024 * 1024:  # < 10MB
             with open(filepath) as f:
                 return json.load(f)
 
-        # 大文件：读取开头和结尾
+        # Large files: read head and tail
         import re
         with open(filepath, 'r') as f:
-            header = f.read(100 * 1024)  # 读取前 100KB
-            # 读取后 100KB（延迟指标在文件末尾）
+            header = f.read(100 * 1024)  # read first 100KB
+            # Read last 100KB (latency metrics are at the end of the file)
             f.seek(max(0, file_size - 100 * 1024))
             footer = f.read()
 
-        # 合并开头和结尾的内容用于搜索
+        # Combine head and tail content for searching
         combined = header + footer
 
         result = {}
 
-        # 需要提取的字段
-        # 吞吐量等在开头，延迟指标在结尾
+        # Fields to extract
+        # Throughput is at the head, latency metrics are at the tail
         fields = [
             'request_throughput', 'output_throughput', 'total_token_throughput',
             'mean_ttft_ms', 'median_ttft_ms', 'p99_ttft_ms',
@@ -71,7 +71,7 @@ def load_bench_result(filepath: Path) -> Optional[Dict]:
         ]
 
         for field in fields:
-            # 匹配 "field": value 模式
+            # Match "field": value pattern
             pattern = rf'"{field}":\s*([^,\}}\]]+)'
             match = re.search(pattern, combined)
             if match:
@@ -88,7 +88,7 @@ def load_bench_result(filepath: Path) -> Optional[Dict]:
 
 
 def extract_metrics(bench_result: Dict) -> Dict[str, float]:
-    """从 benchmark 结果提取关键指标"""
+    """Extract key metrics from benchmark result."""
     return {
         "throughput": bench_result.get("request_throughput", 0),
         "output_throughput": bench_result.get("output_throughput", 0),
@@ -108,7 +108,7 @@ def extract_metrics(bench_result: Dict) -> Dict[str, float]:
 
 
 def collect_grid_results(exp_dir: Path) -> Dict:
-    """收集网格搜索结果
+    """Collect grid search results.
 
     Returns:
         {
@@ -123,7 +123,7 @@ def collect_grid_results(exp_dir: Path) -> Dict:
     bs_values = set()
     results = {}
 
-    # 遍历目录结构: tb{TB}/bs{BS}/
+    # Walk directory structure: tb{TB}/bs{BS}/
     for tb_dir in sorted(exp_dir.iterdir()):
         if not tb_dir.is_dir() or not tb_dir.name.startswith("tb"):
             continue
@@ -148,10 +148,10 @@ def collect_grid_results(exp_dir: Path) -> Dict:
             if key not in results:
                 results[key] = {}
 
-            # 动态检测所有 bench_*.json 文件
+            # Dynamically detect all bench_*.json files
             for bench_file in bs_dir.glob("bench_*.json"):
-                # 从文件名提取调度器名称: bench_pd_ifr_1.json -> pd_ifr_1
-                scheduler = bench_file.stem[6:]  # 去掉 "bench_" 前缀
+                # Extract scheduler name from filename: bench_pd_ifr_1.json -> pd_ifr_1
+                scheduler = bench_file.stem[6:]  # strip "bench_" prefix
                 bench_result = load_bench_result(bench_file)
                 if bench_result:
                     results[key][scheduler] = extract_metrics(bench_result)
@@ -164,9 +164,9 @@ def collect_grid_results(exp_dir: Path) -> Dict:
 
 
 def find_optimal_configs(data: Dict) -> Dict:
-    """找到每个 scheduler 的最优配置"""
+    """Find the optimal configuration for each scheduler."""
     optimal = {}
-    # 动态检测所有调度器
+    # Dynamically detect all schedulers
     all_schedulers = set()
     for sched_results in data["results"].values():
         all_schedulers.update(sched_results.keys())
@@ -194,7 +194,7 @@ def find_optimal_configs(data: Dict) -> Dict:
 
 def compute_improvement_grid(data: Dict, metric: str, pd_scheduler: str = "pd_ifr",
                              higher_better: bool = True) -> Tuple[np.ndarray, list, list]:
-    """计算 PD 相对 baseline 的改进网格
+    """Compute the PD-vs-baseline improvement grid.
 
     Returns:
         (improvement_matrix, tb_values, bs_values)
@@ -223,7 +223,7 @@ def compute_improvement_grid(data: Dict, metric: str, pd_scheduler: str = "pd_if
 
 
 def plot_heatmaps(data: Dict, output_dir: Path):
-    """绘制热力图"""
+    """Plot heatmaps."""
     if not HAS_MATPLOTLIB:
         return
 
@@ -234,7 +234,7 @@ def plot_heatmaps(data: Dict, output_dir: Path):
         ("output_throughput", "Output Throughput Improvement (%)", True),
     ]
 
-    # 检测可用的 PD scheduler
+    # Detect available PD schedulers
     pd_schedulers = []
     for key in ["pd_ifr", "pd_ratio", "pd"]:
         for sched_results in data["results"].values():
@@ -243,7 +243,7 @@ def plot_heatmaps(data: Dict, output_dir: Path):
                 break
 
     if not pd_schedulers:
-        print("未找到 PD 调度器结果，跳过热力图")
+        print("No PD scheduler results found, skipping heatmap")
         return
 
     for pd_sched in pd_schedulers:
@@ -255,14 +255,14 @@ def plot_heatmaps(data: Dict, output_dir: Path):
             matrix, tb_vals, bs_vals = compute_improvement_grid(
                 data, metric, pd_sched, higher_better)
 
-            # 设置颜色范围 (绿色=改进, 红色=退步)
+            # Set color range (green=improvement, red=regression)
             vmax = max(abs(np.nanmin(matrix)), abs(np.nanmax(matrix)), 10)
             vmin = -vmax
 
             cmap = plt.cm.RdYlGn
             im = ax.imshow(matrix, cmap=cmap, vmin=vmin, vmax=vmax, aspect='auto')
 
-            # 设置刻度
+            # Set ticks
             ax.set_xticks(range(len(bs_vals)))
             ax.set_xticklabels([str(b) for b in bs_vals], rotation=45)
             ax.set_yticks(range(len(tb_vals)))
@@ -272,7 +272,7 @@ def plot_heatmaps(data: Dict, output_dir: Path):
             ax.set_ylabel('max_num_batched_tokens (TB)')
             ax.set_title(title)
 
-            # 添加数值标注
+            # Add value annotations
             for i in range(len(tb_vals)):
                 for j in range(len(bs_vals)):
                     val = matrix[i, j]
@@ -293,7 +293,7 @@ def plot_heatmaps(data: Dict, output_dir: Path):
 
 
 def plot_optimal_comparison(optimal: Dict, output_dir: Path):
-    """绘制最优配置对比图"""
+    """Plot optimal configuration comparison."""
     if not HAS_MATPLOTLIB:
         return
 
@@ -306,7 +306,7 @@ def plot_optimal_comparison(optimal: Dict, output_dir: Path):
         ("p99_ttft_ms", "P99 TTFT (ms)", False),
     ]
 
-    # 调度器配置: (key, color, label)
+    # Scheduler configuration: (key, color, label)
     schedulers = [
         ("baseline", '#2ecc71', 'Baseline'),
         ("pd_ratio", '#3498db', 'PD (ratio)'),
@@ -315,11 +315,11 @@ def plot_optimal_comparison(optimal: Dict, output_dir: Path):
         ("pd", '#5dade2', 'PD (legacy)'),
     ]
 
-    # 过滤掉没有数据的调度器
+    # Filter out schedulers with no data
     available_scheds = [(key, color, label) for key, color, label in schedulers if key in optimal]
 
     if len(available_scheds) < 2:
-        print("可用调度器少于 2 个，跳过对比图")
+        print("Fewer than 2 schedulers available, skipping comparison plot")
         return
 
     n_metrics = len(metrics_to_plot)
@@ -343,7 +343,7 @@ def plot_optimal_comparison(optimal: Dict, output_dir: Path):
         width = 0.6 if len(values) <= 3 else 0.4
         bars = ax.bar(x, values, width=width, color=colors)
 
-        # 计算 PD 相对 baseline 的改进
+        # Compute PD-vs-baseline improvement
         baseline_val = optimal.get("baseline", {}).get("metrics", {}).get(metric, 0)
         pd_ifr_val = optimal.get("pd_ifr", {}).get("metrics", {}).get(metric, 0)
         if baseline_val > 0 and pd_ifr_val > 0:
@@ -360,12 +360,12 @@ def plot_optimal_comparison(optimal: Dict, output_dir: Path):
         ax.set_xticklabels(labels, fontsize=8)
         ax.set_title(ylabel, fontsize=10)
 
-        # 在柱子上方标注数值
+        # Annotate values above bars
         for bar, val in zip(bars, values):
             ax.annotate(f'{val:.1f}', xy=(bar.get_x() + bar.get_width()/2, bar.get_height()),
                        ha='center', va='bottom', fontsize=7)
 
-        # 标注改进百分比
+        # Annotate improvement percentage
         if imp_str:
             ax.annotate(imp_str, xy=(0.5, 0.95), xycoords='axes fraction',
                        ha='center', va='top', fontsize=8, fontweight='bold',
@@ -383,19 +383,19 @@ def plot_optimal_comparison(optimal: Dict, output_dir: Path):
 
 
 def generate_report(data: Dict, optimal: Dict) -> str:
-    """生成文本分析报告"""
+    """Generate text analysis report."""
     lines = []
     lines.append("=" * 80)
-    lines.append("Multi-Turn TB × BS 网格搜索分析报告")
+    lines.append("Multi-Turn TB × BS grid search analysis report")
     lines.append("=" * 80)
     lines.append("")
-    lines.append(f"TB 值: {data['tb_values']}")
-    lines.append(f"BS 值: {data['bs_values']}")
+    lines.append(f"TB values: {data['tb_values']}")
+    lines.append(f"BS values: {data['bs_values']}")
     lines.append("")
 
-    # 动态检测并收集可用的调度器
+    # Dynamically detect and collect available schedulers
     def get_display_name(key: str) -> str:
-        """将调度器 key 转换为显示名称"""
+        """Convert a scheduler key to a display name."""
         name_map = {
             "baseline": "Baseline",
             "pd_ratio": "PD (ratio)",
@@ -405,7 +405,7 @@ def generate_report(data: Dict, optimal: Dict) -> str:
         }
         if key in name_map:
             return name_map[key]
-        # 对于带后缀的调度器 (如 pd_ifr_1)，生成友好名称
+        # For schedulers with suffixes (e.g. pd_ifr_1), generate a friendly name
         if key.startswith("pd_"):
             return f"PD ({key[3:]})"
         return key
@@ -416,19 +416,19 @@ def generate_report(data: Dict, optimal: Dict) -> str:
 
     if len(available) >= 2:
         lines.append("=" * 80)
-        lines.append("最优配置")
+        lines.append("Optimal configurations")
         lines.append("=" * 80)
         lines.append("")
         for key, display_name, opt in available:
             lines.append(f"  {display_name:>15}: TB={opt['tb']}, BS={opt['bs']}")
         lines.append("")
 
-        # 获取特定调度器的最优配置
+        # Get optimal config for specific schedulers
         baseline_opt = optimal.get("baseline", {})
         pd_ifr_opt = optimal.get("pd_ifr", {})
         pd_ratio_opt = optimal.get("pd_ratio", {})
 
-        # 对比关键指标
+        # Compare key metrics
         header = f"{'Metric':<25}"
         for key, display_name, opt in available:
             header += f" {display_name:<15}"
@@ -457,7 +457,7 @@ def generate_report(data: Dict, optimal: Dict) -> str:
                 val = opt["metrics"].get(metric, 0)
                 row += f" {val:<15.2f}"
 
-            # 计算 PD(IFR) vs Baseline 改进
+            # Compute PD(IFR) vs Baseline improvement
             if baseline_opt and pd_ifr_opt:
                 b_val = baseline_opt["metrics"].get(metric, 0)
                 p_val = pd_ifr_opt["metrics"].get(metric, 0)
@@ -471,7 +471,7 @@ def generate_report(data: Dict, optimal: Dict) -> str:
                     imp_str = "N/A"
                 row += f" {imp_str:<15}"
 
-            # 计算 PD(ratio) vs Baseline 改进
+            # Compute PD(ratio) vs Baseline improvement
             if baseline_opt and pd_ratio_opt:
                 b_val = baseline_opt["metrics"].get(metric, 0)
                 p_val = pd_ratio_opt["metrics"].get(metric, 0)
@@ -487,22 +487,22 @@ def generate_report(data: Dict, optimal: Dict) -> str:
 
             lines.append(row)
 
-        # 判断胜负 (基于吞吐量)
+        # Determine winner (by throughput)
         throughputs = {display_name: opt["metrics"].get("throughput", 0)
                       for key, display_name, opt in available}
         winner = max(throughputs, key=throughputs.get)
         best_tp = throughputs[winner]
 
         lines.append("")
-        lines.append(f"结论: {winner} 在吞吐量上胜出 ({best_tp:.2f} req/s)")
+        lines.append(f"Conclusion: {winner} wins on throughput ({best_tp:.2f} req/s)")
 
-    # 总结
+    # Summary
     lines.append("")
     lines.append("=" * 80)
-    lines.append("总体结论")
+    lines.append("Overall conclusion")
     lines.append("=" * 80)
 
-    # 统计胜出 (动态检测所有 pd_ 开头的调度器)
+    # Tally winner (dynamically detect all schedulers starting with pd_)
     baseline_tp = optimal.get("baseline", {}).get("metrics", {}).get("throughput", 0)
     best_pd_tp = 0
     best_pd_name = None
@@ -517,14 +517,14 @@ def generate_report(data: Dict, optimal: Dict) -> str:
     if baseline_tp > 0 and best_pd_tp > 0:
         if best_pd_tp > baseline_tp:
             improvement = (best_pd_tp - baseline_tp) / baseline_tp * 100
-            lines.append(f"总体: {best_pd_name} 胜出 (吞吐量提升 {improvement:+.2f}%)")
+            lines.append(f"Overall: {best_pd_name} wins (throughput improvement {improvement:+.2f}%)")
         elif baseline_tp > best_pd_tp:
             improvement = (baseline_tp - best_pd_tp) / baseline_tp * 100
-            lines.append(f"总体: Baseline 胜出 (PD 吞吐量下降 {improvement:.2f}%)")
+            lines.append(f"Overall: Baseline wins (PD throughput dropped {improvement:.2f}%)")
         else:
-            lines.append("总体: Baseline 与 PD 持平")
+            lines.append("Overall: Baseline ties with PD")
     else:
-        lines.append("总体: 数据不足，无法比较")
+        lines.append("Overall: insufficient data for comparison")
 
     lines.append("")
 
@@ -533,46 +533,46 @@ def generate_report(data: Dict, optimal: Dict) -> str:
 
 def main():
     if len(sys.argv) < 2:
-        print("用法: python analyze_results.py <experiment_dir>")
+        print("Usage: python analyze_results.py <experiment_dir>")
         sys.exit(1)
 
     exp_dir = Path(sys.argv[1])
     if not exp_dir.exists():
-        print(f"目录不存在: {exp_dir}")
+        print(f"Directory not found: {exp_dir}")
         sys.exit(1)
 
-    print(f"分析实验目录: {exp_dir}")
+    print(f"Analyzing experiment directory: {exp_dir}")
     print("")
 
-    # 收集数据
+    # Collect data
     data = collect_grid_results(exp_dir)
 
     if not data["results"]:
-        print("未找到任何实验结果")
+        print("No experiment results found")
         sys.exit(1)
 
-    print(f"找到 {len(data['tb_values'])} 个 TB 值: {data['tb_values']}")
-    print(f"找到 {len(data['bs_values'])} 个 BS 值: {data['bs_values']}")
+    print(f"Found {len(data['tb_values'])} TB values: {data['tb_values']}")
+    print(f"Found {len(data['bs_values'])} BS values: {data['bs_values']}")
     print("")
 
-    # 找最优配置
+    # Find optimal configurations
     optimal = find_optimal_configs(data)
 
-    # 生成报告
+    # Generate report
     report = generate_report(data, optimal)
     print(report)
 
-    # 保存报告
+    # Save report
     report_path = exp_dir / "analysis_report.txt"
     with open(report_path, 'w') as f:
         f.write(report)
-    print(f"\n报告已保存: {report_path}")
+    print(f"\nReport saved: {report_path}")
 
-    # 绘图
+    # Plots
     plot_heatmaps(data, exp_dir)
     plot_optimal_comparison(optimal, exp_dir)
 
-    # 保存汇总 JSON
+    # Save summary JSON
     summary = {
         "tb_values": data["tb_values"],
         "bs_values": data["bs_values"],
@@ -586,7 +586,7 @@ def main():
     summary_path = exp_dir / "grid_summary.json"
     with open(summary_path, 'w') as f:
         json.dump(summary, f, indent=2)
-    print(f"汇总数据已保存: {summary_path}")
+    print(f"Summary saved: {summary_path}")
 
 
 if __name__ == "__main__":

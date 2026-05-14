@@ -30,8 +30,11 @@ import sys
 import numpy as np
 from transformers import AutoTokenizer
 
-# Add parent dir so we can import dataset_utils
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# dataset_utils lives at reproduce/common/dataset_utils.py; this script is at
+# reproduce/eb_plus/non_stationary/, so the relative path is ../../common.
+sys.path.insert(
+    0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "common")
+)
 from dataset_utils import load_alpaca_prompts, load_sharegpt_prompts
 
 

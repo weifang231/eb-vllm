@@ -232,16 +232,18 @@ class Scheduler(SchedulerInterface):
             self.pd_batch_size_N = self.max_num_running_reqs
 
             # k* mode selection:
-            #   - "direct": k* 直接计算 (默认)
-            #               若指定 VLLM_PD_K_STAR，使用固定 k*；否则根据 Proposition 1 计算
-            #   - "ratio":  k* = θ* × N (比例模式)
-            #               若指定 VLLM_PD_K_RATIO，使用固定 θ*；否则动态计算 θ*
+            #   - "direct": k* computed directly (default)
+            #               if VLLM_PD_K_STAR is set, use that fixed k*; otherwise
+            #               compute via Proposition 1
+            #   - "ratio":  k* = theta* x N (ratio mode)
+            #               if VLLM_PD_K_RATIO is set, use that fixed theta*; otherwise
+            #               compute theta* dynamically
             self.pd_k_mode = os.environ.get("VLLM_PD_K_MODE", "direct")
-            # direct 模式参数: 若指定 VLLM_PD_K_STAR，使用固定 k*
+            # direct-mode param: if VLLM_PD_K_STAR is set, use that fixed k*
             _k_star_env = os.environ.get("VLLM_PD_K_STAR", "")
             self.pd_k_star_user_specified = bool(_k_star_env)
             self.pd_k_star_fixed = int(_k_star_env) if _k_star_env else 0
-            # ratio 模式参数: 若指定 VLLM_PD_K_RATIO，使用固定 θ*
+            # ratio-mode param: if VLLM_PD_K_RATIO is set, use that fixed theta*
             _k_ratio_env = os.environ.get("VLLM_PD_K_RATIO", "")
             self.pd_k_ratio_user_specified = bool(_k_ratio_env)
             self.pd_k_ratio = float(_k_ratio_env) if _k_ratio_env else 0.0
@@ -321,6 +323,17 @@ class Scheduler(SchedulerInterface):
                 # Maximum theta to prevent excessive waiting
                 self.pd_theta_max = float(os.environ.get(
                     "VLLM_PD_THETA_MAX", "0.80"))
+                # Lower bound on the adaptive theta* (paper's theta_min; see
+                # model.tex clipping rule and appendix on defense-in-depth).
+                # Default 0.3: keeps the controller adaptive across moderate-r
+                # workloads (Tables 2-3) while preventing the analytical
+                # optimum from dropping near 0 at r -> 1 (NuminaMath) and
+                # interacting badly with the kv_escape path. Non-stationary
+                # workloads (Table 5 distribution_shift) override this via
+                # VLLM_PD_THETA_FLOOR=0.7 in their launch scripts to match
+                # paper's reported numbers.
+                self.pd_theta_floor = float(os.environ.get(
+                    "VLLM_PD_THETA_FLOOR", "0.3"))
                 # EMA smoothing for θ* to damp oscillations from noisy
                 # hazard-rate estimates.  α=0.3 means ~70% weight on
                 # previous θ*, providing stability while still tracking
@@ -331,13 +344,13 @@ class Scheduler(SchedulerInterface):
 
             # Initialize k* based on mode
             if self.pd_k_mode == "direct":
-                # 若指定了 k*，使用固定值；否则计算最优 k*
+                # If k* is user-specified, use that fixed value; otherwise compute the optimum.
                 if self.pd_k_star_user_specified:
                     self.pd_switch_threshold_k = max(1, self.pd_k_star_fixed)
                 else:
                     self.pd_switch_threshold_k = self._compute_optimal_k()
             elif self.pd_k_mode == "ratio":
-                # 若未指定 ratio，使用渐近公式计算初始 θ*
+                # If ratio is not user-specified, compute the initial theta* from the asymptotic formula.
                 if not self.pd_k_ratio_user_specified:
                     self.pd_k_ratio = self._compute_optimal_ratio()
                 self.pd_switch_threshold_k = self._compute_k_from_ratio()
@@ -660,11 +673,11 @@ class Scheduler(SchedulerInterface):
 
         # Edge case: if C is very small, θ* ≈ 0
         if C <= 1e-6:
-            return 0.01  # 使用 1% 作为最小值
+            return 0.01  # Use 1% as the lower bound
 
         # Bisection search
         lo, hi = 0.001, 0.999
-        for _ in range(100):  # 足够的迭代次数保证精度
+        for _ in range(100):  # Enough iterations for the required precision
             mid = (lo + hi) / 2
             f_mid = f(mid)
             if abs(f_mid - C) < 1e-9:
@@ -1121,8 +1134,10 @@ class Scheduler(SchedulerInterface):
             delta_theta = 0.0
             theta_star = theta_0
 
-        # Step 4: Clamp to [0.01, θ_max]
-        theta_star = max(0.01, min(theta_star, self.pd_theta_max))
+        # Step 4: Clamp to [max(0.01, theta_floor), θ_max].
+        # theta_floor (env VLLM_PD_THETA_FLOOR, default 0.0) is a regularising
+        # lower bound on the adaptive controller — see __init__ comment for why.
+        theta_star = max(0.01, self.pd_theta_floor, min(theta_star, self.pd_theta_max))
 
         # Step 5: EMA smoothing to damp oscillations from noisy estimates.
         # During cold start (first update), assign directly.
@@ -1283,9 +1298,16 @@ class Scheduler(SchedulerInterface):
         # Compute threshold: reserve this fraction of total blocks
         reserve_ratio = blocks_for_decode / total_blocks
 
-        # Add base reserve and clamp to reasonable bounds [0.05, 0.6]
+        # Add base reserve and clamp to reasonable bounds.
+        # Upper bound is configurable via VLLM_PD_KV_THRESHOLD_MAX (default 0.6).
+        # On r->1 workloads (very long outputs) the formula can saturate this
+        # cap and cause kv_escape to fire repeatedly; in that case setting the
+        # env var to ~0.3 makes kv_escape less aggressive. We keep 0.6 as the
+        # default since lowering it didn't help once the IFR floor (below) is in.
+        kv_threshold_max = float(
+            os.environ.get("VLLM_PD_KV_THRESHOLD_MAX", "0.6"))
         threshold = reserve_ratio + self.pd_base_kv_reserve
-        threshold = max(0.05, min(0.6, threshold))
+        threshold = max(0.05, min(kv_threshold_max, threshold))
 
         return threshold
 
@@ -1348,9 +1370,9 @@ class Scheduler(SchedulerInterface):
         Cold path (every pd_param_update_interval requests): Update all params.
 
         k* update behavior by mode:
-        - "direct": k* 根据 Proposition 1 计算（除非用户指定了 VLLM_PD_K_STAR）
-        - "ratio":  k* = θ* × N, θ* 根据 p 计算（除非用户指定了 VLLM_PD_K_RATIO）
-        - "ifr":    k* = θ* × N, θ* 根据 IFR 校正公式计算（基于 hazard rate 估计）
+        - "direct": k* computed via Proposition 1 (unless VLLM_PD_K_STAR is user-specified)
+        - "ratio":  k* = theta* x N, theta* computed from p (unless VLLM_PD_K_RATIO is user-specified)
+        - "ifr":    k* = theta* x N, theta* from the IFR correction formula (using the hazard-rate estimate)
         """
         # HOT PATH: Only integer operations (zero overhead)
         self.pd_batch_completed_count += 1
@@ -1760,7 +1782,14 @@ class Scheduler(SchedulerInterface):
             # Better to free them now (proactive) than later (reactive).
             elif kv_cache_full and has_decoding:
                 adaptive_n = self._compute_adaptive_N()
-                min_n = max(16, self.max_num_running_reqs // 10)
+                # min_n floor controls how aggressively kv_escape may shrink N.
+                # Configurable via VLLM_PD_MIN_N_FLOOR_DIV (default 10, the
+                # original behaviour). Raising to 2 keeps N >= max_seqs/2 and
+                # prevents collapse, but blocks legitimate gradual shrinking
+                # (hurt WildChat). The IFR floor (VLLM_PD_THETA_FLOOR) is a
+                # better lever for r->1 workloads.
+                _floor_div = int(os.environ.get("VLLM_PD_MIN_N_FLOOR_DIV", "10"))
+                min_n = max(16, self.max_num_running_reqs // _floor_div)
                 # Use the smaller of adaptive_n and current prefilled_count
                 # to ensure we don't oversubscribe KV cache
                 new_n = min(adaptive_n, self.pd_prefilled_count)

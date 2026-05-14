@@ -1,22 +1,22 @@
 #!/bin/bash
 
-# 并发度扫描实验脚本 (WildChat 多轮对话)
-# 固定每个 scheduler 的最优 (TB, BS) 配置，扫描不同并发度下的 TTFT/TPOT/RPS
+# Concurrency sweep script (WildChat multi-turn)
+# Fixes each scheduler's optimal (TB, BS) configuration and sweeps TTFT/TPOT/RPS across concurrency levels
 #
-# 目的:
-#   目标 1: 在低并发 (64, 256) 下展示 scheduler 本身的 TTFT 影响 (排队延迟最小化)
-#   目标 2: 扫描并发度，找到满足 SLO 约束的最大吞吐
+# Goals:
+#   Goal 1: at low concurrency (64, 256), show the scheduler's own TTFT impact (minimal queuing delay)
+#   Goal 2: sweep concurrency to find the max throughput under SLO constraints
 #
-# 用法: ./run_concurrency_sweep.sh [MAX_GPUS]
+# Usage: ./run_concurrency_sweep.sh [MAX_GPUS]
 #
-# 环境变量:
-#   MODEL: 模型路径，默认 Qwen/Qwen3-8B
-#   DATASET_PATH: WildChat 数据集路径
-#   CONCURRENCY_VALUES: 并发度列表，如 "32 64 128 256 512 1024 2048"
-#   SCHEDULERS: 调度器列表，如 "baseline pd_ratio pd_ifr"
-#   K_RATIO: PD ratio 模式的 θ*，默认 0.8
-#   SKIP_EXISTING: 跳过已有结果，默认 1
-#   GPU_TYPE: GPU 类型 (h200/rtx_pro_6000)，用于选择最优配置
+# Environment variables:
+#   MODEL: model path, default Qwen/Qwen3-8B
+#   DATASET_PATH: WildChat dataset path
+#   CONCURRENCY_VALUES: concurrency list, e.g. "32 64 128 256 512 1024 2048"
+#   SCHEDULERS: scheduler list, e.g. "baseline pd_ratio pd_ifr"
+#   K_RATIO: θ* for PD ratio mode, default 0.8
+#   SKIP_EXISTING: skip existing results, default 1
+#   GPU_TYPE: GPU type (h200/rtx_pro_6000), used to select optimal configuration
 
 set -e
 
@@ -32,14 +32,14 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 # ========================================
-# 最优配置查找表 (来自论文 Table)
-# 格式: get_optimal_config <gpu_type> <model_short> <scheduler>
-# 返回: TB BS
+# Optimal configuration lookup table (from paper Table)
+# Format: get_optimal_config <gpu_type> <model_short> <scheduler>
+# Returns: TB BS
 # ========================================
 get_optimal_config() {
     local gpu_type=$1 model_short=$2 scheduler=$3
 
-    # H200 WildChat 最优配置 (来自论文 Table)
+    # H200 WildChat optimal configurations (from paper Table)
     if [ "$gpu_type" = "h200" ]; then
         case "${model_short}|${scheduler}" in
             # EB(1) = pd_ratio
@@ -55,12 +55,12 @@ get_optimal_config() {
             "Qwen3-30B-A3B|pd_ifr")   echo "14336 1024" ;;
             "gemma-3-1b-it|pd_ifr")   echo "18432 1536" ;;
             *)
-                echo "错误: 未知配置 gpu=${gpu_type} model=${model_short} scheduler=${scheduler}" >&2
+                echo "Error: unknown configuration gpu=${gpu_type} model=${model_short} scheduler=${scheduler}" >&2
                 return 1
                 ;;
         esac
     elif [ "$gpu_type" = "rtx_pro_6000" ] || [ "$gpu_type" = "a6000" ]; then
-        # RTX PRO 6000 / A6000 WildChat 最优配置 (来自论文 Table)
+        # RTX PRO 6000 / A6000 WildChat optimal configurations (from paper Table)
         case "${model_short}|${scheduler}" in
             # EB(1) = pd_ratio
             "Qwen3-8B|pd_ratio")       echo "18432 1024" ;;
@@ -75,40 +75,40 @@ get_optimal_config() {
             "Qwen3-30B-A3B|pd_ifr")   echo "18432 512" ;;
             "gemma-3-1b-it|pd_ifr")   echo "14336 2048" ;;
             *)
-                echo "错误: 未知配置 gpu=${gpu_type} model=${model_short} scheduler=${scheduler}" >&2
+                echo "Error: unknown configuration gpu=${gpu_type} model=${model_short} scheduler=${scheduler}" >&2
                 return 1
                 ;;
         esac
     else
-        echo "错误: 未知 GPU 类型: ${gpu_type} (支持: h200, rtx_pro_6000, a6000)" >&2
+        echo "Error: unknown GPU type: ${gpu_type} (supported: h200, rtx_pro_6000, a6000)" >&2
         return 1
     fi
 }
 
 # ========================================
-# 实验参数
+# Experiment parameters
 # ========================================
 MAX_GPUS=${1:-4}
 MODEL=${MODEL:-"Qwen/Qwen3-8B"}
 MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
 GPU_TYPE=${GPU_TYPE:-"h200"}
 
-# 数据集路径
+# Dataset path
 DATASET_PATH=${DATASET_PATH:-"${SCRIPT_DIR}/../outputs/wildchat_multiturn.json"}
 if [ ! -f "$DATASET_PATH" ]; then
-    echo "错误: 数据集文件不存在: $DATASET_PATH"
-    echo "请先导出: python pd_exp/multiturn/export_dataset.py --dataset wildchat --model $MODEL --num-conversations 3000 --min-turns 6 --output $DATASET_PATH"
+    echo "Error: dataset file not found: $DATASET_PATH"
+    echo "Please first export: python pd_exp/multiturn/export_dataset.py --dataset wildchat --model $MODEL --num-conversations 3000 --min-turns 6 --output $DATASET_PATH"
     exit 1
 fi
 
-# 并发度扫描值
+# Concurrency sweep values
 if [ -n "${CONCURRENCY_VALUES_STR:-}" ]; then
     read -ra CONCURRENCY_VALUES <<< "$CONCURRENCY_VALUES_STR"
 else
     CONCURRENCY_VALUES=(32 64 128 256 512 1024 2048)
 fi
 
-# 多轮对话参数
+# Multi-turn parameters
 MAX_TURNS=${MAX_TURNS:-12}
 LIMIT_MAX_TOKENS=${LIMIT_MAX_TOKENS:-256}
 REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
@@ -116,35 +116,35 @@ K_RATIO=${K_RATIO:-0.8}
 BASE_PORT=${BASE_PORT:-12000}
 SCHEDULERS=${SCHEDULERS:-"baseline pd_ratio pd_ifr"}
 
-# 硬件校准文件
+# Hardware calibration file
 if [ -z "${VLLM_PD_CALIBRATION_FILE:-}" ]; then
     DEFAULT_CALIBRATION="${SCRIPT_DIR}/../outputs/pd_calibration_${MODEL_SHORT}.json"
     if [ -f "$DEFAULT_CALIBRATION" ]; then
         export VLLM_PD_CALIBRATION_FILE="$DEFAULT_CALIBRATION"
     else
-        echo "错误: 未找到硬件校准文件: $DEFAULT_CALIBRATION"
-        echo "请先运行: python -m vllm.v1.core.sched.calibration --model ${MODEL} --output ${DEFAULT_CALIBRATION}"
+        echo "Error: hardware calibration file not found: $DEFAULT_CALIBRATION"
+        echo "Please first run: python -m vllm.v1.core.sched.calibration --model ${MODEL} --output ${DEFAULT_CALIBRATION}"
         exit 1
     fi
 fi
-echo "使用校准文件: $VLLM_PD_CALIBRATION_FILE"
+echo "Using calibration file: $VLLM_PD_CALIBRATION_FILE"
 
-# 输出目录
+# Output directory
 OUTPUT_DIR="${SCRIPT_DIR}/../outputs/concurrency_sweep_wildchat_${MODEL_SHORT}_${GPU_TYPE}"
 mkdir -p "$OUTPUT_DIR"
 
-# 初始化环境
+# Initialize environment
 init_experiment_env
 
 echo "========================================"
-echo "并发度扫描实验 (WildChat 多轮对话)"
+echo "Concurrency sweep (WildChat multi-turn)"
 echo "========================================"
 
-# 检测并选择 GPU
+# Detect and select GPUs
 select_gpus $MAX_GPUS
 
 echo ""
-echo "实验配置:"
+echo "Experiment configuration:"
 echo "  MODEL: $MODEL"
 echo "  GPU_TYPE: $GPU_TYPE"
 echo "  DATASET: $DATASET_PATH"
@@ -155,8 +155,8 @@ echo "  CONCURRENCY_VALUES: ${CONCURRENCY_VALUES[*]}"
 echo "  K_RATIO: $K_RATIO"
 echo ""
 
-# 打印每个 scheduler 的最优配置
-echo "最优配置 (来自论文 Table, GPU=$GPU_TYPE, Workload=WildChat):"
+# Print optimal configuration per scheduler
+echo "Optimal configurations (from paper Table, GPU=$GPU_TYPE, Workload=WildChat):"
 for scheduler in $SCHEDULERS; do
     config=$(get_optimal_config "$GPU_TYPE" "$MODEL_SHORT" "$scheduler")
     read -r tb bs <<< "$config"
@@ -165,13 +165,13 @@ done
 echo ""
 
 # ========================================
-# 生成实验队列
+# Generate experiment queue
 # ========================================
 QUEUE_FILE="${OUTPUT_DIR}/experiment_queue.txt"
 RESUME=${RESUME:-false}
 
 if [ "$RESUME" = "true" ] && [ -f "$QUEUE_FILE" ] && [ -s "$QUEUE_FILE" ]; then
-    echo "恢复模式: 使用现有队列文件 ($QUEUE_FILE)"
+    echo "Resume mode: using existing queue file ($QUEUE_FILE)"
     TOTAL_EXPERIMENTS=$(wc -l < "$QUEUE_FILE")
 else
     > "$QUEUE_FILE"
@@ -183,11 +183,11 @@ else
     TOTAL_EXPERIMENTS=$(wc -l < "$QUEUE_FILE")
 fi
 
-echo "总实验数: $TOTAL_EXPERIMENTS"
-echo "  = ${#CONCURRENCY_VALUES[@]} 并发度 × $(echo $SCHEDULERS | wc -w) 调度器"
+echo "Total experiments: $TOTAL_EXPERIMENTS"
+echo "  = ${#CONCURRENCY_VALUES[@]} concurrency levels × $(echo $SCHEDULERS | wc -w) schedulers"
 echo ""
 
-# 保存全局配置
+# Save global configuration
 cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
 {
     "experiment_type": "concurrency_sweep",
@@ -215,16 +215,16 @@ done | sed '$ s/,$//')
 }
 EOF
 
-echo "配置已保存: ${OUTPUT_DIR}/experiment_config.json"
+echo "Configuration saved: ${OUTPUT_DIR}/experiment_config.json"
 echo ""
 
 # ========================================
-# 运行单个实验
+# Run a single experiment
 # ========================================
 run_experiment() {
     local gpu_id=$1 scheduler=$2 num_clients=$3
 
-    # 获取该 scheduler 的最优配置
+    # Get the optimal configuration for this scheduler
     local config
     config=$(get_optimal_config "$GPU_TYPE" "$MODEL_SHORT" "$scheduler") || return 1
     read -r tb bs <<< "$config"
@@ -235,9 +235,9 @@ run_experiment() {
     local bench_log="${result_dir}/logs/${scheduler}_bench.log"
     local result_file="${result_dir}/bench_${scheduler}.json"
 
-    # 检查是否跳过已有结果
+    # Skip if result already exists
     if [ "${SKIP_EXISTING:-1}" = "1" ] && [ -f "$result_file" ]; then
-        echo "[GPU $gpu_id] 跳过: ${scheduler} clients=${num_clients} (结果已存在)"
+        echo "[GPU $gpu_id] Skip: ${scheduler} clients=${num_clients} (result exists)"
         return 0
     fi
 
@@ -247,9 +247,9 @@ run_experiment() {
 
     check_port_available $port $gpu_id || return 1
 
-    echo "[GPU $gpu_id] 开始: ${scheduler} clients=${num_clients} (TB=${tb}, BS=${bs})"
+    echo "[GPU $gpu_id] Starting: ${scheduler} clients=${num_clients} (TB=${tb}, BS=${bs})"
 
-    # 设置环境变量
+    # Set environment variables
     export CUDA_VISIBLE_DEVICES=$gpu_id
     export VLLM_COLLECT_SCHEDULE_STATS=1
 
@@ -273,7 +273,7 @@ run_experiment() {
 
     wait_for_gpu_memory $gpu_id 60 || return 1
 
-    # 启动服务
+    # Start the server
     local dtype_arg=""
     if [ -n "${DTYPE:-}" ]; then
         dtype_arg="--dtype $DTYPE"
@@ -289,12 +289,12 @@ run_experiment() {
     local server_pid=$!
 
     if ! wait_for_server $port $server_pid 180 "$log_file"; then
-        echo "[GPU $gpu_id] 服务启动失败: ${scheduler} clients=${num_clients}"
+        echo "[GPU $gpu_id] Server failed to start: ${scheduler} clients=${num_clients}"
         kill_server $server_pid $gpu_id
         return 1
     fi
 
-    # 运行多轮对话 benchmark
+    # Run multi-turn benchmark
     local _bench_dir="${SCRIPT_DIR}/../../../benchmarks/multi_turn"
     ( cd "$_bench_dir" && python benchmark_serving_multi_turn_threaded.py \
         --input-file "$DATASET_PATH" \
@@ -313,16 +313,16 @@ run_experiment() {
     kill_server $server_pid $gpu_id
 
     if [ $bench_status -eq 0 ]; then
-        echo "[GPU $gpu_id] 完成: ${scheduler} clients=${num_clients}"
+        echo "[GPU $gpu_id] Done: ${scheduler} clients=${num_clients}"
     else
-        echo "[GPU $gpu_id] 失败: ${scheduler} clients=${num_clients}"
+        echo "[GPU $gpu_id] Failed: ${scheduler} clients=${num_clients}"
     fi
 
     return $bench_status
 }
 
 # ========================================
-# 并行调度
+# Parallel scheduling
 # ========================================
 PROGRESS_FILE="${OUTPUT_DIR}/progress.txt"
 LOCK_FILE="${OUTPUT_DIR}/.queue.lock"
@@ -345,9 +345,9 @@ gpu_worker() {
 }
 
 # ========================================
-# 主流程
+# Main flow
 # ========================================
-echo "开始并行执行..."
+echo "Starting parallel execution..."
 echo "========================================"
 
 > "$PROGRESS_FILE"
@@ -355,12 +355,12 @@ echo "========================================"
 for gpu_id in "${GPUS_TO_USE[@]}"; do
     gpu_worker "$gpu_id" &
     WORKER_PIDS+=($!)
-    echo "启动 GPU $gpu_id worker (PID: ${WORKER_PIDS[-1]})"
+    echo "Launched GPU $gpu_id worker (PID: ${WORKER_PIDS[-1]})"
     sleep 10
 done
 
 echo ""
-echo "监控进度: watch -n 5 'wc -l ${PROGRESS_FILE}'"
+echo "Monitor progress: watch -n 5 'wc -l ${PROGRESS_FILE}'"
 echo ""
 
 for pid in "${WORKER_PIDS[@]}"; do
@@ -370,14 +370,14 @@ done
 print_summary "$PROGRESS_FILE" "$TOTAL_EXPERIMENTS" "$OUTPUT_DIR"
 echo ""
 echo "========================================"
-echo "实验完成!"
+echo "Experiments completed!"
 echo "========================================"
 echo ""
-echo "结果目录: $OUTPUT_DIR"
+echo "Result directory: $OUTPUT_DIR"
 echo ""
-echo "运行分析脚本:"
+echo "Run analysis script:"
 echo "  python pd_exp/plot_concurrency_latency.py $OUTPUT_DIR"
 echo ""
-echo "多模型运行示例:"
+echo "Multi-model run examples:"
 echo "  MODEL=Qwen/Qwen3-30B-A3B $0 $MAX_GPUS"
 echo "  MODEL=google/gemma-3-1b-it $0 $MAX_GPUS"
