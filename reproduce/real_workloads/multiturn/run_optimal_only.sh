@@ -48,42 +48,55 @@ detect_gpu_tag() {
 }
 GPU_TAG_DETECTED=$(detect_gpu_tag)
 
-# Resolve per-GPU calibration if not already set.
+# Model dimension (paper has Qwen3-8B and Qwen3-30B-A3B on H200).
+MODEL=${MODEL:-"Qwen/Qwen3-8B"}
+MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
+MODEL_TAG=${MODEL_TAG:-$MODEL_SHORT}
+
+# Resolve per-(GPU, model) calibration if not already set.
 if [ -z "${VLLM_PD_CALIBRATION_FILE:-}" ]; then
-    CALIB="${SCRIPT_DIR}/../../calibration/pd_calibration_Qwen3-8B_${GPU_TAG_DETECTED}.json"
+    CALIB="${SCRIPT_DIR}/../../calibration/pd_calibration_${MODEL_TAG}_${GPU_TAG_DETECTED}.json"
     if [ -f "$CALIB" ]; then
         export VLLM_PD_CALIBRATION_FILE="$CALIB"
         echo "Calibration: $VLLM_PD_CALIBRATION_FILE"
     else
         echo "Error: calibration file not found: $CALIB"
-        echo "Run:  python -m vllm.v1.core.sched.calibration --model Qwen/Qwen3-8B --output $CALIB"
+        echo "Run:  python -m vllm.v1.core.sched.calibration --model $MODEL --output $CALIB"
         exit 1
     fi
 fi
 
-# WildChat optimal (B, N) per scheduler, per GPU, from paper Appendix tables.
+# WildChat optimal (B, N) per (GPU, model, scheduler), from paper Appendix tables.
 # Format: "B N"
-case "$GPU_TAG_DETECTED:$WORKLOAD" in
-    H200:wildchat)
-        BN_BASELINE="4096 2048"    # v1     (tab:optimal-config-h200)
-        BN_PD_RATIO="18432 1536"   # v0
-        BN_PD_IFR="16384 1024"     # EB(k_hat^*)
+case "$GPU_TAG_DETECTED:$MODEL_TAG:$WORKLOAD" in
+    H200:Qwen3-8B:wildchat)
+        BN_BASELINE="4096 2048"     # v1     (tab:optimal-config-h200)
+        BN_PD_RATIO="18432 1536"    # v0
+        BN_PD_IFR="16384 1024"      # EB(k_hat^*)
         ;;
-    RTXPRO6000:wildchat)
-        BN_BASELINE="18432 1024"   # v1     (tab:optimal-config-a6000)
-        BN_PD_RATIO="18432 1024"   # v0
-        BN_PD_IFR="10240 1024"     # EB(k_hat^*)
+    H200:Qwen3-30B-A3B:wildchat)
+        BN_BASELINE="4096 1536"     # v1     (tab:optimal-config-h200)
+        BN_PD_RATIO="16384 1024"    # v0
+        BN_PD_IFR="14336 1024"      # EB(k_hat^*)
         ;;
-    *) echo "Error: unsupported (GPU=$GPU_TAG_DETECTED, workload=$WORKLOAD)"; exit 1 ;;
+    RTXPRO6000:Qwen3-8B:wildchat)
+        BN_BASELINE="18432 1024"    # v1     (tab:optimal-config-a6000)
+        BN_PD_RATIO="18432 1024"    # v0
+        BN_PD_IFR="10240 1024"      # EB(k_hat^*)
+        ;;
+    *) echo "Error: unsupported (GPU=$GPU_TAG_DETECTED, model=$MODEL_TAG, workload=$WORKLOAD)"; exit 1 ;;
 esac
 
+SCHEDULERS=${SCHEDULERS:-"baseline pd_ifr"}
+
 echo "Optimal-only multi-turn run"
-echo "  workload : $WORKLOAD"
-echo "  dataset  : $DATASET_PATH"
-echo "  gpus     : $NUM_GPUS"
-echo "  baseline (v1)        : B,N = ${BN_BASELINE}"
-echo "  pd_ifr   (EB(k_hat*)): B,N = ${BN_PD_IFR}"
-echo "  (pd_ratio skipped — paper v0 not reproduced in this repo)"
+echo "  workload   : $WORKLOAD"
+echo "  dataset    : $DATASET_PATH"
+echo "  gpus       : $NUM_GPUS"
+echo "  schedulers : $SCHEDULERS"
+echo "  baseline (v1)         B,N = ${BN_BASELINE}"
+echo "  pd_ratio (v0)         B,N = ${BN_PD_RATIO}"
+echo "  pd_ifr   (EB(k_hat*)) B,N = ${BN_PD_IFR}"
 echo
 
 run_one() {
@@ -94,7 +107,13 @@ run_one() {
         bash "${SCRIPT_DIR}/run_benchmark.sh" "$DATASET_PATH" "$NUM_GPUS"
 }
 
-# pd_ratio (script's fixed-theta* CFR variant) skipped by default; paper v0
-# numbers were collected on a separate vLLM build, not this repo.
-run_one "baseline (v1)"        baseline  "$BN_BASELINE"
-run_one "pd_ifr   (EB(k_hat*))" pd_ifr   "$BN_PD_IFR"
+# Iterate user-selected schedulers (default: baseline + pd_ifr; add pd_ratio
+# via  SCHEDULERS="baseline pd_ratio pd_ifr" ./run_optimal_only.sh ...).
+for sched in $SCHEDULERS; do
+    case "$sched" in
+        baseline) run_one "baseline (v1)"        baseline "$BN_BASELINE" ;;
+        pd_ratio) run_one "pd_ratio (v0)"        pd_ratio "$BN_PD_RATIO" ;;
+        pd_ifr)   run_one "pd_ifr   (EB(k_hat*))" pd_ifr  "$BN_PD_IFR" ;;
+        *) echo "Error: unknown scheduler '$sched' (expected baseline/pd_ratio/pd_ifr)"; exit 1 ;;
+    esac
+done

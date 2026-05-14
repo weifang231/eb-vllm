@@ -1,8 +1,8 @@
-# Reproduction Report — H200 + Qwen3-8B
+# Reproduction Report — H200 + Qwen3-8B (+ Qwen3-30B-A3B add-on)
 
 One row per paper figure/table. Reproduction was done on a single 8× H200 node
-running this repo at `release/icml2026`, only on Qwen3-8B (no RTX PRO 6000,
-L40S, B300, or other models tested).
+running this repo at `release/icml2026`, primarily on Qwen3-8B. A second pass on
+Qwen3-30B-A3B (Tables 2-3 only) is documented at the bottom of the report.
 
 **Legend**: ✅ = reproduced and within tolerance · ⚠️ = reproduced with caveats
 · ⛔ = not run (out of scope or hardware not available)
@@ -461,6 +461,96 @@ Paper plot script committed at `reproduce/scalability/plot_scalmodel_paper.py`
 
 ---
 
+## Tables 2-3 add-on — Qwen3-30B-A3B on H200 (paper §4.3.2 / §4.5)
+
+Same four workloads as Tables 2-3, run on **Qwen3-30B-A3B** (MoE) instead of
+the dense Qwen3-8B, using each scheduler's paper-appendix optimal (B, N) from
+`tab:optimal-config-h200`. Calibration auto-generated to
+`reproduce/calibration/pd_calibration_Qwen3-30B-A3B_H200.json` (α_p=0.01754,
+β_p=1.35e-5, α_d=0.02442, β_d=2.43e-5). 4000 prompts × concurrency 2048,
+identical methodology to the Qwen3-8B run above.
+
+Status: ⚠️ **REPRODUCED, BUT WITH NEGATIVE FINDING** — on Qwen3-30B-A3B,
+`pd_ifr` (EB(k̂\*)) is **slower** than baseline on all 4 workloads. This is the
+opposite of paper Tables 2-3 expectations.
+
+### RPS — each scheduler at its own paper-appendix optimal (B, N)
+
+| Workload | v1 (baseline) | v0 (pd_ratio) | EB(k̂\*) (pd_ifr) | EB vs v1 |
+|---|---:|---:|---:|---:|
+| ShareGPT   | **7.212** (B=8192,  N=2048) | 6.427 (B=14336, N=1536) | 3.499 (B=4096,  N=1536) | **−51.5%** |
+| LongBench  | **1.920** (B=14336, N=2048) | 1.707 (B=18432, N=256)  | 0.901 (B=16384, N=1024) | **−53.1%** |
+| NuminaMath | **1.894** (B=8192,  N=512)  | 1.708 (B=10240, N=1024) | 1.055 (B=10240, N=512)  | **−44.3%** |
+| WildChat   | **34.877** (B=4096, N=1536) | 26.391 (B=16384, N=1024) | 22.188 (B=14336, N=1024) | **−36.4%** |
+
+### Output throughput (tok/s)
+
+| Workload | v1 | v0 | EB(k̂\*) |
+|---|---:|---:|---:|
+| ShareGPT   | **9,829.2** | 8,751.5 | 4,770.5 |
+| LongBench  | **4,099.3** | 3,654.1 | 1,921.9 |
+| NuminaMath | **7,525.9** | 6,785.6 | 4,190.5 |
+| WildChat   | **8,808.6** | 6,699.9 | 5,610.5 |
+
+### Verdict
+
+Baseline v1 wins on every workload. EB(k̂\*) underperforms by 36-53%. This
+contradicts paper Tables 2-3 (Qwen3-30B-A3B column) and is worth flagging to
+the authors. Likely root causes (not yet diagnosed):
+
+1. **Calibration cost model mismatch for MoE.** The IFR controller's
+   prefill/decode cost is fit as `α + β·n_tokens` (linear). For Qwen3-30B-A3B,
+   only 8 of 128 experts activate per token, so per-token compute is
+   batch-shape-dependent in a way the linear model doesn't capture. α_p went
+   from 0.00128 (Qwen3-8B) to 0.01754 (Qwen3-30B-A3B) — a 14× increase the
+   controller treats as constant overhead, but the actual MoE routing cost
+   varies with batch composition.
+2. **Phase-thrashing at low (B, N) values.** The paper-appendix EB(k̂\*) cell
+   for ShareGPT uses B=4096, N=1536 — half the baseline B. The scheduler
+   logs show rapid `DECODE ↔ REFILL_PREFILL` oscillation with prefilled=0,
+   decoded=0 for many steps, i.e. neither phase makes progress. Same pattern
+   on NuminaMath. The kv_escape mechanism may interact badly with the MoE
+   cost model.
+3. **θ_min default may need a different value for MoE.** θ_min=0.3 was tuned
+   on Qwen3-8B. Did not test sensitivity sweep for MoE.
+
+Not investigated further in this run — the user (paper second author) is
+aware. The 30B-A3B path is **not part of the camera-ready primary claim**
+(Tables 2-3 main column is Qwen3-8B); the 30B-A3B column is an appendix
+ablation. Anyone reproducing the appendix should expect to need additional
+tuning or controller changes.
+
+### Files
+
+```
+reproduce/outputs/optimal_only_sharegpt_prompts_Qwen3-30B-A3B_Con_2048_Prompts_4000/
+reproduce/outputs/optimal_only_longbench_prefill_Qwen3-30B-A3B_Con_2048_Prompts_4000/
+reproduce/outputs/optimal_only_numina_math_prompts_Qwen3-30B-A3B_Con_2048_Prompts_4000/
+reproduce/real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-30B-A3B_Clients_2048_MaxTurns_12/
+reproduce/calibration/pd_calibration_Qwen3-30B-A3B_H200.json
+```
+
+Commands to reproduce:
+
+```bash
+# 1) calibration (one-time, GPU 0, ~10 min)
+.venv/bin/python -m vllm.v1.core.sched.calibration \
+    --model Qwen/Qwen3-30B-A3B \
+    --output reproduce/calibration/pd_calibration_Qwen3-30B-A3B_H200.json
+
+# 2) per-workload, single-turn (each ~45-90 min)
+GPUS=0,1 SCHEDULERS="baseline pd_ratio pd_ifr" MODEL=Qwen/Qwen3-30B-A3B \
+    bash reproduce/real_workloads/run_optimal_only.sh \
+        reproduce/outputs/sharegpt_prompts.jsonl 2
+
+# 3) wildchat (multi-turn)
+GPUS=6,7 SCHEDULERS="baseline pd_ratio pd_ifr" MODEL=Qwen/Qwen3-30B-A3B \
+    bash reproduce/real_workloads/multiturn/run_optimal_only.sh \
+        reproduce/outputs/wildchat_multiturn.json 2
+```
+
+---
+
 # Summary table
 
 | Paper artifact | Section | Status | Notes |
@@ -476,6 +566,7 @@ Paper plot script committed at `reproduce/scalability/plot_scalmodel_paper.py`
 | Disaggregation | §4.4 + App | ✅ | EB⁺ > baseline > vLLM native P/D at c=64; native P/D OOMs at c=2048 (paper claim ✓) |
 | Table 6 (cross-GPU) | §4.5.1 | ⛔ | L40S/B300 unavailable |
 | Figure 7 (cross-model) | §4.5.2 | ⛔ | Multi-model grid not run |
+| Tables 2-3 (Qwen3-30B-A3B add-on) | §4.3.2 / §4.5 | ⚠️ | Reproduced; **EB(k̂\*) underperforms v1 by 36-53%** on all 4 workloads — opposite of paper. Likely MoE cost-model mismatch (calibration is linear; MoE per-token cost is batch-shape-dependent) |
 
 # Overall conclusion
 
@@ -506,6 +597,12 @@ reproduce, modulo:
 **Out of scope on this hardware**: anything requiring RTX PRO 6000 (where EB's
 gains over v1 are largest by paper's own account), L40S, B300, or non-Qwen3-8B
 models — §4.5 Scalability would need those.
+
+**Negative finding worth flagging to authors**: on **Qwen3-30B-A3B (MoE)** with
+paper-appendix optimal (B, N), `pd_ifr` underperforms baseline by 36-53% across
+ShareGPT/LongBench/NuminaMath/WildChat. Calibration α_p jumps 14× from the
+dense Qwen3-8B (0.00128 → 0.01754), suggesting the linear `α + β·n` cost model
+fits MoE poorly. See "Tables 2-3 add-on — Qwen3-30B-A3B" above.
 
 # Reproduction commands
 

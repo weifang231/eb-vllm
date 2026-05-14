@@ -79,9 +79,11 @@ if [ -z "${WORKLOAD:-}" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Per-(GPU, workload, scheduler) (B, N) lookup, from paper Appendix Tables
-# tab:optimal-config-h200 and tab:optimal-config-a6000 (Qwen3-8B).
-# Values: "B,N". GPU_TAG is set by detect_gpu_name (H200 / RTXPRO6000 / ...).
+# Per-(GPU, model, workload, scheduler) (B, N) lookup, from paper Appendix
+# Tables tab:optimal-config-h200 / tab:optimal-config-a6000 (Qwen3-8B,
+# Qwen3-30B-A3B).  Values: "B,N".
+#   GPU_TAG    set by detect_gpu_name (H200 / RTXPRO6000 / ...).
+#   MODEL_TAG  derived from $MODEL_SHORT below (e.g. Qwen3-8B / Qwen3-30B-A3B).
 #
 # Scheduler -> paper-vocab mapping (see evaluation.tex §4.3.1):
 #   baseline = v1 (vLLM default mixed batching)
@@ -91,51 +93,61 @@ fi
 lookup_bn() {
     local workload=$1 scheduler=$2
     local gpu_key="${GPU_TAG:-H200}"
-    case "${gpu_key}:${workload}:${scheduler}" in
+    local model_key="${MODEL_TAG:-Qwen3-8B}"
+    case "${gpu_key}:${model_key}:${workload}:${scheduler}" in
         # ===== H200, Qwen3-8B =====
-        # ShareGPT
-        H200:sharegpt:baseline)        echo "10240,1024" ;;  # v1
-        H200:sharegpt:pd_ratio)        echo "18432,2048" ;;  # v0
-        H200:sharegpt:pd_ifr)          echo "16384,1536" ;;  # EB(k_hat^*)
+        H200:Qwen3-8B:sharegpt:baseline)        echo "10240,1024" ;;  # v1
+        H200:Qwen3-8B:sharegpt:pd_ratio)        echo "18432,2048" ;;  # v0
+        H200:Qwen3-8B:sharegpt:pd_ifr)          echo "16384,1536" ;;  # EB(k_hat^*)
 
-        # LongBench
-        H200:longbench:baseline)       echo "14336,256"  ;;  # v1
-        H200:longbench:pd_ratio)       echo "18432,256"  ;;  # v0
-        H200:longbench:pd_ifr)         echo "14336,2048" ;;  # EB(k_hat^*)
+        H200:Qwen3-8B:longbench:baseline)       echo "14336,256"  ;;  # v1
+        H200:Qwen3-8B:longbench:pd_ratio)       echo "18432,256"  ;;  # v0
+        H200:Qwen3-8B:longbench:pd_ifr)         echo "14336,2048" ;;  # EB(k_hat^*)
 
-        # WildChat
-        H200:wildchat:baseline)        echo "4096,2048"  ;;  # v1
-        H200:wildchat:pd_ratio)        echo "18432,1536" ;;  # v0
-        H200:wildchat:pd_ifr)          echo "16384,1024" ;;  # EB(k_hat^*)
+        H200:Qwen3-8B:wildchat:baseline)        echo "4096,2048"  ;;  # v1
+        H200:Qwen3-8B:wildchat:pd_ratio)        echo "18432,1536" ;;  # v0
+        H200:Qwen3-8B:wildchat:pd_ifr)          echo "16384,1024" ;;  # EB(k_hat^*)
 
-        # NuminaMath
-        H200:numina_math:baseline)     echo "14336,256"  ;;  # v1
-        H200:numina_math:pd_ratio)     echo "10240,256"  ;;  # v0
-        H200:numina_math:pd_ifr)       echo "18432,256"  ;;  # EB(k_hat^*)
+        H200:Qwen3-8B:numina_math:baseline)     echo "14336,256"  ;;  # v1
+        H200:Qwen3-8B:numina_math:pd_ratio)     echo "10240,256"  ;;  # v0
+        H200:Qwen3-8B:numina_math:pd_ifr)       echo "18432,256"  ;;  # EB(k_hat^*)
+
+        # ===== H200, Qwen3-30B-A3B (paper Appendix tab:optimal-config-h200) =====
+        H200:Qwen3-30B-A3B:sharegpt:baseline)     echo "8192,2048"  ;;  # v1
+        H200:Qwen3-30B-A3B:sharegpt:pd_ratio)     echo "14336,1536" ;;  # v0
+        H200:Qwen3-30B-A3B:sharegpt:pd_ifr)       echo "4096,1536"  ;;  # EB(k_hat^*)
+
+        H200:Qwen3-30B-A3B:longbench:baseline)    echo "14336,2048" ;;  # v1
+        H200:Qwen3-30B-A3B:longbench:pd_ratio)    echo "18432,256"  ;;  # v0
+        H200:Qwen3-30B-A3B:longbench:pd_ifr)      echo "16384,1024" ;;  # EB(k_hat^*)
+
+        H200:Qwen3-30B-A3B:wildchat:baseline)     echo "4096,1536"  ;;  # v1
+        H200:Qwen3-30B-A3B:wildchat:pd_ratio)     echo "16384,1024" ;;  # v0
+        H200:Qwen3-30B-A3B:wildchat:pd_ifr)       echo "14336,1024" ;;  # EB(k_hat^*)
+
+        H200:Qwen3-30B-A3B:numina_math:baseline)  echo "8192,512"   ;;  # v1
+        H200:Qwen3-30B-A3B:numina_math:pd_ratio)  echo "10240,1024" ;;  # v0
+        H200:Qwen3-30B-A3B:numina_math:pd_ifr)    echo "10240,512"  ;;  # EB(k_hat^*)
 
         # ===== RTX PRO 6000, Qwen3-8B =====
-        # ShareGPT
-        RTXPRO6000:sharegpt:baseline)        echo "16384,1536" ;;  # v1
-        RTXPRO6000:sharegpt:pd_ratio)        echo "14336,1536" ;;  # v0
-        RTXPRO6000:sharegpt:pd_ifr)          echo "14336,1536" ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-8B:sharegpt:baseline)        echo "16384,1536" ;;  # v1
+        RTXPRO6000:Qwen3-8B:sharegpt:pd_ratio)        echo "14336,1536" ;;  # v0
+        RTXPRO6000:Qwen3-8B:sharegpt:pd_ifr)          echo "14336,1536" ;;  # EB(k_hat^*)
 
-        # LongBench
-        RTXPRO6000:longbench:baseline)       echo "10240,1024" ;;  # v1
-        RTXPRO6000:longbench:pd_ratio)       echo "16384,512"  ;;  # v0
-        RTXPRO6000:longbench:pd_ifr)         echo "16384,512"  ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-8B:longbench:baseline)       echo "10240,1024" ;;  # v1
+        RTXPRO6000:Qwen3-8B:longbench:pd_ratio)       echo "16384,512"  ;;  # v0
+        RTXPRO6000:Qwen3-8B:longbench:pd_ifr)         echo "16384,512"  ;;  # EB(k_hat^*)
 
-        # WildChat
-        RTXPRO6000:wildchat:baseline)        echo "18432,1024" ;;  # v1
-        RTXPRO6000:wildchat:pd_ratio)        echo "18432,1024" ;;  # v0
-        RTXPRO6000:wildchat:pd_ifr)          echo "10240,1024" ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-8B:wildchat:baseline)        echo "18432,1024" ;;  # v1
+        RTXPRO6000:Qwen3-8B:wildchat:pd_ratio)        echo "18432,1024" ;;  # v0
+        RTXPRO6000:Qwen3-8B:wildchat:pd_ifr)          echo "10240,1024" ;;  # EB(k_hat^*)
 
-        # NuminaMath
-        RTXPRO6000:numina_math:baseline)     echo "14336,256"  ;;  # v1
-        RTXPRO6000:numina_math:pd_ratio)     echo "8192,256"   ;;  # v0
-        RTXPRO6000:numina_math:pd_ifr)       echo "4096,256"   ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-8B:numina_math:baseline)     echo "14336,256"  ;;  # v1
+        RTXPRO6000:Qwen3-8B:numina_math:pd_ratio)     echo "8192,256"   ;;  # v0
+        RTXPRO6000:Qwen3-8B:numina_math:pd_ifr)       echo "4096,256"   ;;  # EB(k_hat^*)
 
         *)
-            echo "Error: no (B,N) entry for GPU=$gpu_key workload=$workload scheduler=$scheduler" >&2
+            echo "Error: no (B,N) entry for GPU=$gpu_key model=$model_key workload=$workload scheduler=$scheduler" >&2
             return 1
             ;;
     esac
@@ -145,6 +157,9 @@ lookup_bn() {
 # scripts can compare apples to apples).
 MODEL=${MODEL:-"Qwen/Qwen3-8B"}
 MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
+# MODEL_TAG keys into lookup_bn().  Override via env to support new models
+# without renaming the HF id (e.g. quantised variants).
+MODEL_TAG=${MODEL_TAG:-$MODEL_SHORT}
 NUM_PROMPTS=${NUM_PROMPTS:-4000}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:-2048}
 NUM_WARMUP_REQUESTS=${NUM_WARMUP_REQUESTS:-20}
@@ -179,7 +194,7 @@ echo "Optimal-config-only run (no grid search)"
 echo "========================================"
 echo "  WORKLOAD: $WORKLOAD"
 echo "  DATASET: $DATASET_PATH"
-echo "  MODEL: $MODEL"
+echo "  MODEL: $MODEL  (TAG=$MODEL_TAG)"
 echo "  NUM_PROMPTS: $NUM_PROMPTS"
 echo "  MAX_CONCURRENCY: $MAX_CONCURRENCY"
 echo "  CUSTOM_OUTPUT_LEN: $CUSTOM_OUTPUT_LEN"
