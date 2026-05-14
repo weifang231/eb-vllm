@@ -146,6 +146,25 @@ lookup_bn() {
         RTXPRO6000:Qwen3-8B:numina_math:pd_ratio)     echo "8192,256"   ;;  # v0
         RTXPRO6000:Qwen3-8B:numina_math:pd_ifr)       echo "4096,256"   ;;  # EB(k_hat^*)
 
+        # ===== H200, cross-model (paper §4.5.2 Figure 7 — paper uses RTX PRO 6000,
+        # but we report H200 numbers using Qwen3-8B's (B, N) as proxy since paper
+        # Figure 7 doesn't publish per-model H200 optima for these dense 7-8B models).
+        H200:Llama-3.1-8B-Instruct:sharegpt:baseline)        echo "10240,1024" ;;
+        H200:Llama-3.1-8B-Instruct:sharegpt:pd_ratio)        echo "18432,2048" ;;
+        H200:Llama-3.1-8B-Instruct:sharegpt:pd_ifr)          echo "16384,1536" ;;
+
+        H200:Mathstral-7B-v0.1:sharegpt:baseline)            echo "10240,1024" ;;
+        H200:Mathstral-7B-v0.1:sharegpt:pd_ratio)            echo "18432,2048" ;;
+        H200:Mathstral-7B-v0.1:sharegpt:pd_ifr)              echo "16384,1536" ;;
+
+        H200:Qwen2.5-Coder-7B:sharegpt:baseline)             echo "10240,1024" ;;
+        H200:Qwen2.5-Coder-7B:sharegpt:pd_ratio)             echo "18432,2048" ;;
+        H200:Qwen2.5-Coder-7B:sharegpt:pd_ifr)               echo "16384,1536" ;;
+
+        H200:DeepSeek-R1-Distill-Qwen-7B:sharegpt:baseline)  echo "10240,1024" ;;
+        H200:DeepSeek-R1-Distill-Qwen-7B:sharegpt:pd_ratio)  echo "18432,2048" ;;
+        H200:DeepSeek-R1-Distill-Qwen-7B:sharegpt:pd_ifr)    echo "16384,1536" ;;
+
         *)
             echo "Error: no (B,N) entry for GPU=$gpu_key model=$model_key workload=$workload scheduler=$scheduler" >&2
             return 1
