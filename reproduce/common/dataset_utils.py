@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Dataset loading utilities for PD scheduler experiments.
 
@@ -9,19 +11,18 @@ import json
 import os
 import random
 import warnings
-from typing import Optional
 
 import numpy as np
 
 # Suppress tokenizer length warnings
 warnings.filterwarnings(
-    "ignore",
-    message="Token indices sequence length is longer than"
+    "ignore", message="Token indices sequence length is longer than"
 )
 
 # HuggingFace datasets
 try:
     from datasets import load_dataset
+
     HF_AVAILABLE = True
 except ImportError:
     HF_AVAILABLE = False
@@ -44,8 +45,7 @@ def parse_alpaca_text(text: str) -> tuple[str, str]:
 
 
 def load_alpaca_prompts(
-    max_samples: int = 1000,
-    tokenizer=None
+    max_samples: int = 1000, tokenizer=None
 ) -> tuple[list[str], list[int], list[int]]:
     """
     Load prompts from Alpaca dataset.
@@ -73,7 +73,7 @@ def load_alpaca_prompts(
         if i >= max_samples:
             break
 
-        text = item.get('text', '')
+        text = item.get("text", "")
         if text:
             input_text, output_text = parse_alpaca_text(text)
 
@@ -98,9 +98,7 @@ def load_alpaca_prompts(
 
 
 def load_sharegpt_prompts(
-    json_path: str = DEFAULT_SHAREGPT_PATH,
-    max_samples: int = 1000,
-    tokenizer=None
+    json_path: str = DEFAULT_SHAREGPT_PATH, max_samples: int = 1000, tokenizer=None
 ) -> tuple[list[str], list[int], list[int]]:
     """
     Load prompts from ShareGPT dataset.
@@ -118,7 +116,7 @@ def load_sharegpt_prompts(
     if not os.path.exists(json_path):
         raise FileNotFoundError(f"ShareGPT file not found: {json_path}")
 
-    with open(json_path, 'r', encoding='utf-8') as f:
+    with open(json_path, encoding="utf-8") as f:
         data = json.load(f)
 
     prompts = []
@@ -132,7 +130,7 @@ def load_sharegpt_prompts(
         if sample_count >= max_samples:
             break
 
-        conversations = item.get('conversations', [])
+        conversations = item.get("conversations", [])
         if not conversations:
             continue
 
@@ -140,13 +138,13 @@ def load_sharegpt_prompts(
         while i < len(conversations) and sample_count < max_samples:
             turn = conversations[i]
 
-            if turn.get('from') == 'human':
-                input_text = turn.get('value', '').strip()
-                output_text = ''
+            if turn.get("from") == "human":
+                input_text = turn.get("value", "").strip()
+                output_text = ""
                 if i + 1 < len(conversations):
                     next_turn = conversations[i + 1]
-                    if next_turn.get('from') == 'gpt':
-                        output_text = next_turn.get('value', '').strip()
+                    if next_turn.get("from") == "gpt":
+                        output_text = next_turn.get("value", "").strip()
                         i += 1
 
                 if input_text and output_text:
@@ -174,8 +172,7 @@ def load_sharegpt_prompts(
 
 
 def load_lmsys_prompts(
-    max_samples: int = 1000,
-    tokenizer=None
+    max_samples: int = 1000, tokenizer=None
 ) -> tuple[list[str], list[int], list[int]]:
     """
     Load prompts from LMSYS-Chat-1M dataset.
@@ -204,20 +201,20 @@ def load_lmsys_prompts(
         if sample_count >= max_samples:
             break
 
-        conversation = item.get('conversation', [])
+        conversation = item.get("conversation", [])
         if not conversation:
             continue
 
-        input_text = ''
-        output_text = ''
+        input_text = ""
+        output_text = ""
 
         for turn in conversation:
-            role = turn.get('role', '')
-            content = turn.get('content', '').strip()
+            role = turn.get("role", "")
+            content = turn.get("content", "").strip()
 
-            if role == 'user' and not input_text:
+            if role == "user" and not input_text:
                 input_text = content
-            elif role == 'assistant' and input_text and not output_text:
+            elif role == "assistant" and input_text and not output_text:
                 output_text = content
                 break
 
@@ -268,9 +265,9 @@ def load_longbench_prompts(
     if not HF_AVAILABLE:
         raise ImportError("Please install datasets: pip install datasets")
 
-    print(f"Loading THUDM/LongBench-v2 from HuggingFace...")
+    print("Loading THUDM/LongBench-v2 from HuggingFace...")
     print(f"  Input length range: [{min_input_len}, {max_input_len}] tokens")
-    print(f"  Long contexts will be chunked with random sizes in this range")
+    print("  Long contexts will be chunked with random sizes in this range")
     dataset = load_dataset("THUDM/LongBench-v2", split="train")
 
     prompts = []
@@ -285,12 +282,12 @@ def load_longbench_prompts(
         if len(prompts) >= max_samples:
             break
 
-        context = item.get('context', '')
-        question = item.get('question', '')
-        choice_a = item.get('choice_A', '')
-        choice_b = item.get('choice_B', '')
-        choice_c = item.get('choice_C', '')
-        choice_d = item.get('choice_D', '')
+        context = item.get("context", "")
+        question = item.get("question", "")
+        choice_a = item.get("choice_A", "")
+        choice_b = item.get("choice_B", "")
+        choice_c = item.get("choice_C", "")
+        choice_d = item.get("choice_D", "")
 
         if not context or not question:
             continue
@@ -300,7 +297,9 @@ def load_longbench_prompts(
         # Build the question suffix (fixed part)
         choices_text = ""
         if choice_a or choice_b or choice_c or choice_d:
-            choices_text = f"\n\nA. {choice_a}\nB. {choice_b}\nC. {choice_c}\nD. {choice_d}"
+            choices_text = (
+                f"\n\nA. {choice_a}\nB. {choice_b}\nC. {choice_c}\nD. {choice_d}"
+            )
         question_suffix = f"\n\nQuestion: {question}{choices_text}\n\nAnswer:"
 
         # Calculate suffix length
@@ -346,13 +345,15 @@ def load_longbench_prompts(
             pos = 0
             while pos < len(words):
                 # Randomly pick chunk size for this iteration
-                words_per_chunk = random.randint(min_words_per_chunk, max_words_per_chunk)
+                words_per_chunk = random.randint(
+                    min_words_per_chunk, max_words_per_chunk
+                )
                 end = min(pos + words_per_chunk, len(words))
                 chunk_words = words[pos:end]
 
                 # Only add if chunk is large enough
                 if len(chunk_words) >= min_words_per_chunk:
-                    chunk_text = ' '.join(chunk_words)
+                    chunk_text = " ".join(chunk_words)
                     chunks.append(chunk_text)
 
                 pos = end
@@ -384,7 +385,10 @@ def load_longbench_prompts(
 
         # Progress indicator
         if len(prompts) % 1000 == 0 and len(prompts) > 0:
-            print(f"  Loaded {len(prompts)} samples from {original_samples} original contexts...")
+            print(
+                f"  Loaded {len(prompts)} samples from "
+                f"{original_samples} original contexts..."
+            )
 
     print(f"Loaded {len(prompts)} prompts from LongBench-v2")
     print(f"  Original contexts: {original_samples}")
@@ -420,7 +424,7 @@ def load_numina_math_prompts(
     if not HF_AVAILABLE:
         raise ImportError("Please install datasets: pip install datasets")
 
-    print(f"Loading AI-MO/NuminaMath-CoT from HuggingFace...")
+    print("Loading AI-MO/NuminaMath-CoT from HuggingFace...")
     print(f"  min_output_len filter: {min_output_len} tokens")
     dataset = load_dataset("AI-MO/NuminaMath-CoT", split="train", streaming=True)
 
@@ -439,17 +443,17 @@ def load_numina_math_prompts(
             break
 
         processed_count += 1
-        messages = item.get('messages', [])
+        messages = item.get("messages", [])
 
         # Extract user question and assistant response
         user_content = None
         assistant_content = None
 
         for msg in messages:
-            if msg.get('role') == 'user' and user_content is None:
-                user_content = msg.get('content', '').strip()
-            elif msg.get('role') == 'assistant' and assistant_content is None:
-                assistant_content = msg.get('content', '').strip()
+            if msg.get("role") == "user" and user_content is None:
+                user_content = msg.get("content", "").strip()
+            elif msg.get("role") == "assistant" and assistant_content is None:
+                assistant_content = msg.get("content", "").strip()
 
         if not user_content or not assistant_content:
             continue
@@ -475,10 +479,16 @@ def load_numina_math_prompts(
 
         # Progress indicator
         if len(prompts) % 1000 == 0:
-            print(f"  Loaded {len(prompts)} samples (processed {processed_count}, filtered {filtered_count})")
+            print(
+                f"  Loaded {len(prompts)} samples "
+                f"(processed {processed_count}, filtered {filtered_count})"
+            )
 
     print(f"Loaded {len(prompts)} prompts from NuminaMath-CoT")
-    print(f"  Processed: {processed_count}, Filtered (output < {min_output_len}): {filtered_count}")
+    print(
+        f"  Processed: {processed_count}, "
+        f"Filtered (output < {min_output_len}): {filtered_count}"
+    )
     if len(prompts) > 0:
         print(f"  Average input length: {np.mean(input_lengths):.1f} tokens")
         print(f"  Average output length: {np.mean(output_lengths):.1f} tokens")
@@ -526,8 +536,8 @@ def load_processbench_prompts(
         if i >= max_samples:
             break
 
-        problem = item.get('problem', '')
-        steps = item.get('steps', [])
+        problem = item.get("problem", "")
+        steps = item.get("steps", [])
 
         if problem:
             # Build the prompt
@@ -544,7 +554,11 @@ def load_processbench_prompts(
                 output_len = len(tokenizer.encode(output_text)) if output_text else 256
             else:
                 input_len = int(len(input_text.split()) * WORD_TO_TOKEN_RATIO)
-                output_len = int(len(output_text.split()) * WORD_TO_TOKEN_RATIO) if output_text else 256
+                output_len = (
+                    int(len(output_text.split()) * WORD_TO_TOKEN_RATIO)
+                    if output_text
+                    else 256
+                )
 
             input_lengths.append(input_len)
             output_lengths.append(output_len)
@@ -552,7 +566,9 @@ def load_processbench_prompts(
     print(f"Loaded {len(prompts)} prompts from ProcessBench ({split})")
     if len(prompts) > 0:
         print(f"Average input length: {np.mean(input_lengths):.1f} tokens")
-        print(f"Average output length: {np.mean(output_lengths):.1f} tokens (estimated)")
+        print(
+            f"Average output length: {np.mean(output_lengths):.1f} tokens (estimated)"
+        )
         print(f"Step-by-step mode: {step_by_step}")
 
     return prompts, input_lengths, output_lengths
@@ -586,7 +602,7 @@ def load_wildchat_conversations(
     if not HF_AVAILABLE:
         raise ImportError("Please install datasets: pip install datasets")
 
-    print(f"Loading allenai/WildChat-1M from HuggingFace...")
+    print("Loading allenai/WildChat-1M from HuggingFace...")
     print(f"  min_turns filter: {min_turns}")
     # Use streaming to avoid loading entire dataset
     dataset = load_dataset("allenai/WildChat-1M", split="train", streaming=True)
@@ -600,8 +616,8 @@ def load_wildchat_conversations(
             break
 
         processed_count += 1
-        conv_data = item.get('conversation', [])
-        turn_count = item.get('turn', 0)
+        conv_data = item.get("conversation", [])
+        turn_count = item.get("turn", 0)
 
         # Filter by minimum turns
         if turn_count < min_turns:
@@ -611,10 +627,10 @@ def load_wildchat_conversations(
         # Extract messages
         messages = []
         for msg in conv_data:
-            role = msg.get('role', '')
-            content = msg.get('content', '').strip()
+            role = msg.get("role", "")
+            content = msg.get("content", "").strip()
 
-            if role in ('user', 'assistant') and content:
+            if role in ("user", "assistant") and content:
                 messages.append({"role": role, "content": content})
 
         # Validate conversation structure
@@ -623,38 +639,40 @@ def load_wildchat_conversations(
             continue
 
         # Ensure conversation starts with user
-        if messages and messages[0]['role'] != 'user':
+        if messages and messages[0]["role"] != "user":
             messages = messages[1:]
 
         # Ensure alternating user/assistant pattern
         valid_messages = []
-        expected_role = 'user'
+        expected_role = "user"
         for msg in messages:
-            if msg['role'] == expected_role:
+            if msg["role"] == expected_role:
                 valid_messages.append(msg)
-                expected_role = 'assistant' if expected_role == 'user' else 'user'
+                expected_role = "assistant" if expected_role == "user" else "user"
 
         # Need at least min_turns complete rounds (user + assistant)
         if len(valid_messages) < min_turns * 2:
             filtered_count += 1
             continue
 
-        conv_id = item.get('conversation_hash', f"conv_{len(conversations)}")
-        conversations.append({
-            "id": conv_id,
-            "messages": valid_messages
-        })
+        conv_id = item.get("conversation_hash", f"conv_{len(conversations)}")
+        conversations.append({"id": conv_id, "messages": valid_messages})
 
         # Progress indicator
         if len(conversations) % 100 == 0:
-            print(f"  Loaded {len(conversations)} conversations "
-                  f"(processed {processed_count}, filtered {filtered_count})")
+            print(
+                f"  Loaded {len(conversations)} conversations "
+                f"(processed {processed_count}, filtered {filtered_count})"
+            )
 
     print(f"Loaded {len(conversations)} conversations from WildChat-1M")
-    print(f"  Processed: {processed_count}, Filtered (turns < {min_turns}): {filtered_count}")
+    print(
+        f"  Processed: {processed_count}, "
+        f"Filtered (turns < {min_turns}): {filtered_count}"
+    )
 
     if conversations:
-        turn_counts = [len(c['messages']) for c in conversations]
+        turn_counts = [len(c["messages"]) for c in conversations]
         print(f"  Average turns per conversation: {np.mean(turn_counts):.1f}")
         print(f"  Turn range: [{np.min(turn_counts)}, {np.max(turn_counts)}]")
 
@@ -662,17 +680,19 @@ def load_wildchat_conversations(
         if tokenizer:
             total_tokens = []
             for conv in conversations[:100]:  # Sample first 100
-                tokens = sum(len(tokenizer.encode(m['content'])) for m in conv['messages'])
+                tokens = sum(
+                    len(tokenizer.encode(m["content"])) for m in conv["messages"]
+                )
                 total_tokens.append(tokens)
-            print(f"  Avg tokens per conversation (sample): {np.mean(total_tokens):.1f}")
+            print(
+                f"  Avg tokens per conversation (sample): {np.mean(total_tokens):.1f}"
+            )
 
     return conversations
 
 
 def apply_chat_template(
-    prompts: list[str],
-    tokenizer,
-    enable_thinking: bool = True
+    prompts: list[str], tokenizer, enable_thinking: bool = True
 ) -> list[str]:
     """
     Apply chat template to prompts.
