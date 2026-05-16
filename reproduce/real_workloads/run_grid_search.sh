@@ -117,7 +117,7 @@ BS_VALUES=(256 512 1024 1536 2048)
 TB_VALUES=(4096 8192 10240 14336 16384 18432)
 
 # Output directory (includes model name)
-OUTPUT_DIR="${SCRIPT_DIR}/../outputs/grid_search_${DATASET_NAME}_${MODEL_SHORT}_Con_${MAX_CONCURRENCY}_Prompts_${NUM_PROMPTS}"
+OUTPUT_DIR="${SCRIPT_DIR}/../outputs/grid_search_${DATASET_NAME}_${MODEL_SHORT}_Con_${MAX_CONCURRENCY}_Prompts_${NUM_PROMPTS}${OUTPUT_DIR_SUFFIX:-}"
 mkdir -p "$OUTPUT_DIR"
 
 # Initialize environment
@@ -296,6 +296,11 @@ run_experiment() {
         --result-dir "${result_dir}"
         --result-filename "bench_${scheduler}${suffix}.json"
     )
+
+    # IGNORE_EOS=true forces fixed output_len per request (paper protocol).
+    if [ "${IGNORE_EOS:-false}" = "true" ]; then
+        bench_cmd+=(--ignore-eos)
+    fi
 
     # When thinking mode is disabled, use chat backend and add extra-body argument
     # --backend openai-chat correctly wraps the prompt as messages
