@@ -195,8 +195,10 @@ read_calibration_params
 echo "Calibration: $VLLM_PD_CALIBRATION_FILE"
 
 # Output dir is parallel to run_grid_search's, but with an "optimal_only"
-# prefix so analysis scripts can pick whichever is preferred.
-OUTPUT_DIR="${SCRIPT_DIR}/../outputs/optimal_only_${DATASET_NAME}_${MODEL_SHORT}_Con_${MAX_CONCURRENCY}_Prompts_${NUM_PROMPTS}"
+# prefix so analysis scripts can pick whichever is preferred.  OUTPUT_DIR_SUFFIX
+# lets two parallel runs (e.g. ablating VLLM_PD_THETA_FLOOR) write to distinct
+# dirs without collision.
+OUTPUT_DIR="${SCRIPT_DIR}/../outputs/optimal_only_${DATASET_NAME}_${MODEL_SHORT}_Con_${MAX_CONCURRENCY}_Prompts_${NUM_PROMPTS}${OUTPUT_DIR_SUFFIX:-}"
 mkdir -p "$OUTPUT_DIR"
 
 init_experiment_env
@@ -317,7 +319,7 @@ run_experiment() {
         $dtype_arg >> "$log_file" 2>&1 &
     local server_pid=$!
 
-    if ! wait_for_server "$port" "$server_pid" 240 "$log_file"; then
+    if ! wait_for_server "$port" "$server_pid" 600 "$log_file"; then
         echo "[GPU $gpu_id] FAIL: server didn't start"
         kill_server "$server_pid" "$gpu_id"
         return 1
@@ -339,6 +341,15 @@ run_experiment() {
         --result-dir "${result_dir}"
         --result-filename "bench_${scheduler}.json"
     )
+    # IGNORE_EOS=true forces fixed output_len per request (matches paper
+    # §evaluation.tex:50 which caps outputs at workload-specific values).
+    # Required for Qwen3-30B-A3B (and other Instruct models that don't emit
+    # EOS as quickly as Qwen3-8B). Qwen3-8B's natural EOS already lands near
+    # paper's caps, so default IGNORE_EOS=false preserves the existing
+    # 8B reproduction unchanged.
+    if [ "${IGNORE_EOS:-false}" = "true" ]; then
+        bench_cmd+=(--ignore-eos)
+    fi
     if [ "$ENABLE_THINKING" = "false" ]; then
         bench_cmd+=(--backend openai-chat)
         bench_cmd+=(--endpoint /v1/chat/completions)
