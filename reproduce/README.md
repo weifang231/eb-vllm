@@ -4,6 +4,53 @@ This directory contains the experiment scripts, analysis tools, and plot
 scripts that reproduce every figure and table in the paper. Each
 `secX_Y_*/` subdirectory corresponds to a specific paper section.
 
+## Quick Start
+
+```bash
+# 1. Clone + setup environment
+git clone https://github.com/weifang231/eb-vllm
+cd eb-vllm
+git checkout release/icml2026
+pip install -e .                # vLLM editable install (~20 min compile)
+pip install matplotlib numpy pandas scipy
+
+# 2. One-time per-(model, GPU) cost-model calibration
+python -m vllm.v1.core.sched.calibration \
+    --model Qwen/Qwen3-8B \
+    --output reproduce/calibration/pd_calibration_Qwen3-8B_<GPU_TAG>.json
+# (Sample H200 / RTX PRO 6000 calibrations shipped under reproduce/calibration/.)
+
+# 3. Run one paper artifact (example: Table 3 H200, Qwen3-8B ShareGPT)
+cd reproduce/real_workloads
+IGNORE_EOS=true CUSTOM_OUTPUT_LEN=500 MODEL=Qwen/Qwen3-8B \
+    bash run_optimal_only.sh ../outputs/sharegpt_prompts.jsonl 1
+
+# 4. Analyze / plot
+python analyze_grid_search.py ../outputs/optimal_only_sharegpt_prompts_Qwen3-8B_*
+```
+
+**Workload protocol** (paper §4.1 — match `IGNORE_EOS` + `CUSTOM_OUTPUT_LEN` per
+workload):
+
+| Workload | `CUSTOM_OUTPUT_LEN` | `IGNORE_EOS` |
+|----------|---------------------|--------------|
+| ShareGPT | `-1` (dataset-native, cap ≤500) | `true` |
+| LongBench | `20` | `true` |
+| NumimaMath | `4000` | `true` |
+| WildChat | n/a (multi-turn chat) | n/a |
+
+**EB⁺ runs (Table 4, Table 5)** additionally need the offline-profiled
+mixed-batch cost coefficients (see Appendix `app:eb-plus-calibration`):
+```bash
+export VLLM_PD_CP_COST_A=2.494e-05   # H200 Qwen3-8B; recalibrate per (model, GPU)
+export VLLM_PD_CP_COST_B=5.193e-05
+export VLLM_PD_CP_COST_C=1.478e-05
+export VLLM_PD_MODE_SWITCH_DELTA=1e-5
+```
+
+For end-to-end recipes with expected runtimes, see [`REPRODUCE.md`](REPRODUCE.md).
+For per-figure reproduction status, see [`REPRODUCTION_REPORT.md`](REPRODUCTION_REPORT.md).
+
 ## Paper section → subdirectory
 
 | Paper section | Artifact | Subdirectory |

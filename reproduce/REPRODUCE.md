@@ -84,11 +84,46 @@ python plot_real_workload_latency.py \
     --ttft-output ttft.pdf --tpot-output tpot.pdf
 ```
 
+**Workload protocol** (paper §4.1; set `IGNORE_EOS` and `CUSTOM_OUTPUT_LEN`
+to match the per-workload truncation cap):
+
+| Workload | `CUSTOM_OUTPUT_LEN` | `IGNORE_EOS` | Notes |
+|----------|---------------------|--------------|-------|
+| ShareGPT | `-1` (dataset-native, cap ≤500) | `true` | output mean ≈ 280 tok |
+| LongBench | `20` | `true` | forced short output |
+| NumimaMath | `4000` | `true` | forced full chain-of-thought |
+| WildChat | n/a | n/a | multi-turn chat-mode, see `multiturn/` |
+
+Single-cell example (optimal `(B, N)` from Appendix `tab:optimal-config-h200`):
+```bash
+IGNORE_EOS=true CUSTOM_OUTPUT_LEN=500 MODEL=Qwen/Qwen3-8B \
+    ./run_optimal_only.sh ../outputs/sharegpt_prompts.jsonl 1
+IGNORE_EOS=true CUSTOM_OUTPUT_LEN=20 MODEL=Qwen/Qwen3-8B \
+    ./run_optimal_only.sh ../outputs/longbench_prefill.jsonl 1
+IGNORE_EOS=true CUSTOM_OUTPUT_LEN=4000 MODEL=Qwen/Qwen3-8B \
+    ./run_optimal_only.sh ../outputs/numina_math_prompts.jsonl 1
+```
+
 For multi-turn dialogue (WildChat) preprocessing, see
 [`real_workloads/multiturn/`](real_workloads/multiturn/).
 
 ## 7. §4.4 — EB⁺ (≈30 min for traffic, ≈2 h for non-stationary)
 
+**EB⁺ requires offline mixed-batch cost calibration** (Appendix
+`app:eb-plus-calibration`). The default coefficients for H200 Qwen3-8B
+are shipped in `reproduce/calibration/beta_mb_Qwen3-8B_H200.json`. For
+other (model, GPU) pairs, refit from v1 grid data and update env vars:
+
+```bash
+# H200 Qwen3-8B (provided)
+export VLLM_PD_CP_COST_A=2.494e-05
+export VLLM_PD_CP_COST_B=5.193e-05
+export VLLM_PD_CP_COST_C=1.478e-05
+# Mode-switch hysteresis δ — match observed |LHS-RHS| magnitude
+export VLLM_PD_MODE_SWITCH_DELTA=1e-5
+```
+
+Then run the EB⁺ experiments:
 ```bash
 cd ../eb_plus/traffic
 MODEL=Qwen/Qwen3-8B ./run_adaptive_selector_cfr.sh 8
@@ -96,10 +131,14 @@ python analyze_cfr_selector.py outputs/adaptive_selector/<GPU>_<MODEL>
 
 cd ../non_stationary
 python generate_distribution_shift_dataset.py
-./run_distribution_shift.sh
-./run_concurrency_shift.sh
+./run_distribution_shift.sh 0    # positional arg = GPU_ID, not MAX_GPUS
+./run_concurrency_shift.sh 1
 python plot_distribution_shift.py outputs/
 ```
+
+If `pd_auto_stats.json` shows `mode_switch_count = 0`, the crossover
+hysteresis `VLLM_PD_MODE_SWITCH_DELTA` is too large for the observed
+LHS-RHS magnitude — try `1e-6` (or refit `(a, b, c)`).
 
 ## 8. §4.4 — Disaggregation comparison (≈4 h on 4 GPUs)
 
