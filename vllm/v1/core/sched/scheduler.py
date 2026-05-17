@@ -323,17 +323,14 @@ class Scheduler(SchedulerInterface):
                 # Maximum theta to prevent excessive waiting
                 self.pd_theta_max = float(os.environ.get(
                     "VLLM_PD_THETA_MAX", "0.80"))
-                # Lower bound on the adaptive theta* (paper's theta_min; see
-                # model.tex clipping rule and appendix on defense-in-depth).
-                # Default 0.3: keeps the controller adaptive across moderate-r
-                # workloads (Tables 2-3) while preventing the analytical
-                # optimum from dropping near 0 at r -> 1 (NuminaMath) and
-                # interacting badly with the kv_escape path. Non-stationary
-                # workloads (Table 5 distribution_shift) override this via
-                # VLLM_PD_THETA_FLOOR=0.7 in their launch scripts to match
-                # paper's reported numbers.
+                # Lower bound on the adaptive theta* (paper's theta_min;
+                # see model.tex clipping rule). Default 0.01: paper-time
+                # near-no-floor. Workload-specific clipping (0.3/0.7/0.85)
+                # is no longer needed because the runtime KV-aware phase
+                # 1->2 gate (Appendix app:kv-aware-gate) handles the
+                # underlying phase-thrashing at the root.
                 self.pd_theta_floor = float(os.environ.get(
-                    "VLLM_PD_THETA_FLOOR", "0.3"))
+                    "VLLM_PD_THETA_FLOOR", "0.01"))
                 # EMA smoothing for θ* to damp oscillations from noisy
                 # hazard-rate estimates.  α=0.3 means ~70% weight on
                 # previous θ*, providing stability while still tracking
@@ -1847,7 +1844,15 @@ class Scheduler(SchedulerInterface):
             # naturally degrading to continuous-batching behavior under light load.
             # Uses integer arithmetic to avoid float division:
             #   fillable * (N - k*) >= n * k*
-            if num_decoding > 0:
+            #
+            # KV-AWARE GUARD (Appendix app:kv-aware-gate): also require KV
+            # cache to have room for the refill. If kv_cache_full, the ratio
+            # condition may trigger but refill cannot allocate blocks ->
+            # scheduler bounces back to DECODE in Phase 2 (kv_cache_full
+            # escape path) -> rapid phase thrashing. Stay in DECODE until
+            # existing requests finish and free KV space; natural EOS /
+            # completion paths then refill.
+            if num_decoding > 0 and not kv_cache_full:
                 N = self.pd_batch_size_N
                 k_star = self.pd_switch_threshold_k
                 fillable = min(waiting_count, max(0, N - num_decoding))

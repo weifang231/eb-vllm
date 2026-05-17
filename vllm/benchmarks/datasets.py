@@ -673,6 +673,82 @@ class RandomDataset(BenchmarkDataset):
 # -----------------------------------------------------------------------------
 
 
+class GeometricRandomDataset(RandomDataset):
+    """
+    Synthetic dataset for CFR (constant failure rate / constant hazard rate)
+    serving experiments.
+
+    Differs from RandomDataset only in how lengths are sampled:
+      - Output lengths follow a geometric distribution with parameter
+        p_0 = 1 / output_len so that E[output_len] = output_len.  This matches
+        the CFR regime under which the midpoint algorithm
+        (Proposition prop:threshold_cfr) is derived.
+      - Input lengths are sampled uniformly from
+        [floor(input_len * (1 - range_ratio)),
+         ceil(input_len * (1 + range_ratio))]; range_ratio defaults to 0.5
+        as used in the paper's CFR experiments.
+
+    All other behaviour (token sequence generation, prefix handling, etc.)
+    is inherited unchanged from RandomDataset.
+    """
+
+    # Sensible defaults for paper's CFR workloads.
+    DEFAULT_RANGE_RATIO = 0.5
+    # Maximum allowed output length to clip extreme tail draws of the
+    # geometric distribution (kept generous; tightened by the server's own
+    # max_model_len at inference time).
+    DEFAULT_OUTPUT_CLIP = 8192
+
+    def get_sampling_params(
+        self,
+        num_requests: int,
+        range_ratio: float,
+        input_len: int,
+        output_len: int,
+        tokenizer: TokenizerLike,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if not (0.0 <= range_ratio < 1.0):
+            raise ValueError("range_ratio must be in [0, 1).")
+        if output_len <= 0:
+            raise ValueError("output_len must be positive for geometric sampling.")
+
+        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
+        real_input_len = max(0, int(input_len) - num_special_tokens)
+        input_low = math.floor(real_input_len * (1 - range_ratio))
+        input_high = math.ceil(real_input_len * (1 + range_ratio))
+        if input_low > input_high:
+            raise ValueError(
+                f"Invalid input sampling interval: low={input_low} > "
+                f"high={input_high}"
+            )
+
+        # Geometric output lengths with mean = output_len.
+        # numpy's geometric returns values in {1, 2, ...} (shifted geom),
+        # which has mean 1/p, matching E[O] = output_len when p = 1/output_len.
+        p_geom = 1.0 / float(output_len)
+        # Clip is a defensive bound on the heavy right tail.
+        clip = int(max(output_len * 16, self.DEFAULT_OUTPUT_CLIP))
+
+        input_lens = self._rng.integers(input_low, input_high + 1, size=num_requests)
+        output_lens = self._rng.geometric(p=p_geom, size=num_requests).astype(np.int64)
+        np.clip(output_lens, 1, clip, out=output_lens)
+        offsets = self._rng.integers(0, tokenizer.vocab_size, size=num_requests)
+
+        logger.info(
+            "Sampling input_len from [%s, %s] (uniform); "
+            "output_len ~ Geometric(p=%.6f) with E[O]=%s "
+            "(realised mean=%.1f, max=%d, clip=%d)",
+            input_low,
+            input_high,
+            p_geom,
+            output_len,
+            float(output_lens.mean()),
+            int(output_lens.max()),
+            clip,
+        )
+        return input_lens, output_lens, offsets
+
+
 class RandomDatasetForReranking(RandomDataset):
     """
     Random dataset specialized for the needs of scoring:
@@ -1305,9 +1381,9 @@ class _ValidateDatasetArgs(argparse.Action):
         dataset_path = getattr(namespace, "dataset_path", None)
 
         # Validate the combination
-        if dataset_name == "random" and dataset_path is not None:
+        if dataset_name in ("random", "geometric_random") and dataset_path is not None:
             parser.error(
-                "Cannot use 'random' dataset with --dataset-path. "
+                f"Cannot use '{dataset_name}' dataset with --dataset-path. "
                 "Please specify the appropriate --dataset-name (e.g., "
                 "'sharegpt', 'custom', 'sonnet') for your dataset file: "
                 f"{dataset_path}"
@@ -1334,6 +1410,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "random",
             "random-mm",
             "random-rerank",
+            "geometric_random",
             "hf",
             "custom",
             "prefix_repetition",
@@ -1376,7 +1453,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--custom-output-len",
         type=int,
         default=256,
-        help="Number of output tokens per request, used only for custom dataset.",
+        help="Number of output tokens per request, used only for custom dataset. "
+        "Set to -1 to use per-request output_len from JSONL data.",
     )
 
     spec_bench_group = parser.add_argument_group("spec bench dataset options")
@@ -1877,6 +1955,22 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
             ),
+            "geometric_random": lambda: GeometricRandomDataset(
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                disable_shuffle=args.disable_shuffle,
+                prefix_len=args.common_prefix_len,
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                prefix_len=args.random_prefix_len,
+                input_len=args.random_input_len,
+                output_len=args.random_output_len,
+                range_ratio=args.random_range_ratio,
+                request_id_prefix=args.request_id_prefix,
+                batchsize=args.random_batch_size,
+                no_oversample=args.no_oversample,
+            ),
             "random-rerank": lambda: RandomDatasetForReranking(
                 random_seed=args.seed,
                 dataset_path=args.dataset_path,
@@ -2012,11 +2106,15 @@ class CustomDataset(BenchmarkDataset):
                 )
 
             prompt_len = len(tokenizer(prompt).input_ids)
+            if output_len is not None and output_len >= 0:
+                req_output_len = output_len
+            else:
+                req_output_len = int(item.get("output_len", 256))
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
                     prompt_len=prompt_len,
-                    expected_output_len=output_len,
+                    expected_output_len=req_output_len,
                     request_id=request_id_prefix + str(i),
                 )
             )

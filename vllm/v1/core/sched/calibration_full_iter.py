@@ -61,7 +61,7 @@ class HardwareParams:
     device_name: str = ""
     dtype: str = "float16"
     timestamp: str = ""
-    measurement_type: str = "full_iteration"  # marks this as the full-iteration variant
+    measurement_type: str = "full_iteration"  # Marker: full-iteration version
 
     # Fitting quality metrics
     prefill_r2: float = 0.0  # R² score for prefill fit
@@ -266,7 +266,7 @@ class HardwareCalibratorFullIter:
         """
         assert self.engine_core is not None
 
-        # ========== Begin timing: covers the entire iteration ==========
+        # ========== Timing start: covers the full iteration ==========
         timer = GPUTimer()
         timer.start()
 
@@ -286,7 +286,7 @@ class HardwareCalibratorFullIter:
         # 3. Update scheduler state
         self.engine_core.scheduler.update_from_output(scheduler_output, model_output)
 
-        # ========== End timing ==========
+        # ========== Timing end ==========
         elapsed = timer.stop()
 
         # Count decode / prefill batch sizes
@@ -401,7 +401,7 @@ class HardwareCalibratorFullIter:
                     self.engine_core.step_fn()
                 self._cleanup_all_requests()
 
-                # Actual measurement - use the full-iteration variant
+                # Actual measurement: use full-iteration timing
                 self._add_request(prefill_size, max_tokens=1)
                 num_d, num_p, total_tokens, elapsed = self._run_single_step_full_iter()
 
@@ -435,7 +435,7 @@ class HardwareCalibratorFullIter:
                     logger.warning(f"  Could not prepare {num_decode} decode requests")
                     break
 
-                # Use the full-iteration variant
+                # Use full-iteration timing
                 num_d, num_p, total_tokens, elapsed = self._run_single_step_full_iter()
 
                 if i >= self.num_warmup and num_d > 0:
@@ -621,7 +621,7 @@ def main():
         default=0.9,
         help="GPU memory utilization (default: 0.9)",
     )
-    # Default output is pd_exp/outputs/pd_calibration_full_iter.json
+    # Default output to pd_exp/outputs/pd_calibration_full_iter.json
     default_output = Path(__file__).parent.parent.parent.parent.parent / "pd_exp" / "outputs" / "pd_calibration_full_iter.json"
     parser.add_argument(
         "--output", "-o",
