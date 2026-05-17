@@ -55,8 +55,24 @@ EB⁺ requires **no manual tuning**: the cost-model parameters (α\_p, α\_d, β
 ```bash
 git clone https://github.com/weifang231/eb-vllm.git
 cd eb-vllm
-pip install -e .            # Same install flow as upstream vLLM
+python -m venv .venv && source .venv/bin/activate
+pip install torch                                       # match your CUDA
+VLLM_USE_PRECOMPILED=1 pip install -e . --no-build-isolation
+                            # ~30 s; fetches all 8 .so (incl. FA3) from
+                            # the official vLLM wheel — see warning below
 ```
+
+> **⚠ Do NOT drop `VLLM_USE_PRECOMPILED=1` on Hopper GPUs (H100/H200/H800).**
+> A locally-compiled `vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so` causes a
+> ~10× throughput regression on Hopper (measured H200 + Qwen3-8B ShareGPT:
+> 15.6 → 1.5 RPS, TPOT 339 ms → 4158 ms). On non-Hopper GPUs (A100/A6000/
+> L40/RTX 6000 Blackwell/...) vLLM uses FA2 and the local FA3 build is
+> inert, but using `VLLM_USE_PRECOMPILED=1` is still recommended — it
+> skips the 15–25 min CUDA compile and guarantees CI-validated binaries.
+> eb-vllm's diff vs upstream vLLM is **pure-Python** (`vllm/v1/core/sched/`
+> + `reproduce/`), so the upstream precompiled .so are ABI-compatible.
+> Only build locally if you modified `csrc/`; on Hopper, overwrite the
+> resulting `_vllm_fa3_C.abi3.so` with the version from the official wheel.
 
 The new scheduler code lives in [`vllm/v1/core/sched/`](vllm/v1/core/sched/). Reproduction scripts in [`reproduce/`](reproduce/).
 

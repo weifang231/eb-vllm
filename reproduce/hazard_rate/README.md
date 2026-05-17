@@ -8,7 +8,8 @@ illustration. Backs `CFR_IFR.pdf` and `hazard_rate_comparison.pdf` in §3.
 
 | File | Purpose |
 |---|---|
-| `run_hazard_rate_experiment.sh`, `run_hazard_rate_experiment_v2.sh` | Sample output lengths under different scheduler modes |
+| `run_hazard_rate_experiment.sh` | **Canonical** hazard-rate sweep used for the paper (called from `run_all_paper_artifacts.sh`). |
+| `run_hazard_rate_experiment_v2.sh` | _Experimental_ — finer k* step + 5 repeats + cool-down. Not used for the camera-ready figure; kept for reference / sensitivity studies. |
 | `analyze_hazard_rate.py`, `analyze_hazard_rate_robust.py` | Compute empirical hazard rates |
 | `analyze_real_workload_hazard.py` | Per-dataset hazard-rate breakdown (ShareGPT, WildChat, etc.) |
 | `plot_sharegpt_hazard_rate.py` | Render the empirical hazard rate of ShareGPT |

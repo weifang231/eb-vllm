@@ -8,22 +8,48 @@ Times below are wall-clock estimates on 8×RTX PRO 6000 Blackwell (96 GB each).
 ```bash
 # Build vLLM from this fork (release/icml2026 branch, tagged icml2026-camera-ready)
 cd <repo-root>
-pip install -e .               # ~20 min if compiling kernels
-.venv/bin/vllm --version       # smoke check
+python -m venv .venv && source .venv/bin/activate
+pip install torch                                   # match your CUDA
+VLLM_USE_PRECOMPILED=1 pip install -e . --no-build-isolation
+                                # ~30 s; fetches all 8 .so (incl. FA3) from
+                                # the official vLLM wheel. See FA3 warning
+                                # below — do NOT skip this env var.
+vllm --version                  # smoke check
 
 # Required Python deps for analysis / plotting
 pip install matplotlib numpy pandas scipy
 ```
 
-A `docker/` recipe is provided for a fully reproducible environment.
+A `docker/` recipe is provided for a fully reproducible environment;
+the `vllm-openai` base image already ships the correct precompiled binaries.
+
+> **⚠ FA3 warning — do NOT drop `VLLM_USE_PRECOMPILED=1`.**
+> A locally-compiled `vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so` causes a
+> ~10× throughput regression. Measured on H200 + Qwen3-8B (ShareGPT):
+>
+> | configuration | RPS | TPOT |
+> |---|---|---|
+> | All 8 .so from official wheel (`VLLM_USE_PRECOMPILED=1`) | **15.65** | 339 ms |
+> | Local-compiled FA3 only (other 7 .so from wheel)        | 1.48 | 4158 ms |
+> | Fully fresh local install (`pip install -e .`)          | 1.47 | 4181 ms |
+>
+> Only FA3 matters — the other 7 .so can be either. eb-vllm's diff vs
+> upstream vLLM is **pure-Python** (`vllm/v1/core/sched/` + `reproduce/`),
+> so the upstream precompiled FA3 binary is ABI-compatible.
+>
+> If you must build C++/CUDA locally (e.g. you modified `csrc/`), overwrite
+> `vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so` with the version extracted
+> from the official vLLM wheel after building. The other .so are safe to
+> leave as-is.
 
 ## 1. Generate per-(model, GPU) calibration (one-time)
 
 ```bash
-cd reproduce
-python -m vllm.v1.core.sched.calibration \
-    --model Qwen/Qwen3-8B \
-    --output calibration/pd_calibration_Qwen3-8B_$(./common/common_cfr.sh detect && echo $GPU_TAG).json
+# Default --output auto-detects the GPU tag (H200 / RTXPRO6000 / ...) and
+# writes to reproduce/calibration/pd_calibration_<model>_<GPU>.json — the
+# same path the runner scripts (resolve_calibration in common_cfr.sh) look
+# up. Pass --output explicitly only if you want a non-standard location.
+python -m vllm.v1.core.sched.calibration --model Qwen/Qwen3-8B
 ```
 
 Repeat for any other (model, GPU) you intend to run. The sample

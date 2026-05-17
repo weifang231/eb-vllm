@@ -8,7 +8,8 @@ the §4.3.2 throughput Tables 2-3 and §4.3.3 latency Figs. `ttft.pdf`, `tpot.pd
 
 | File | Purpose |
 |---|---|
-| `run_grid_search.sh`, `run_grid_search_v0.sh` | Grid search over all 4 workloads × selected schedulers |
+| `run_grid_search.sh` | **Canonical** grid search over all 4 workloads × selected schedulers (used for paper Tables 2–3) |
+| `run_grid_search_v0.sh` | _Legacy_ — earlier v0-scheduler-only variant kept for reference; not invoked by `run_all_paper_artifacts.sh`. Use `run_grid_search.sh` instead. |
 | `analyze_grid_search.py` | Aggregate to `optimal_per_scheduler.json` (per workload, per scheduler) |
 | `plot_real_workload_latency.py` | Bar charts for TTFT and TPOT (accepts the JSON or `--demo`) |
 | `multiturn/` | WildChat multi-turn dialogue preprocessing |

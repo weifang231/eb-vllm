@@ -16,7 +16,8 @@ measures the ENTIRE iteration time including:
 
 Usage:
     # Run calibration
-    python -m vllm.v1.core.sched.calibration_full_iter --model Qwen/Qwen3-8B -o params.json
+    python -m vllm.v1.core.sched.calibration_full_iter \\
+        --model Qwen/Qwen3-8B -o params.json
 
     # Use calibrated parameters
     VLLM_PD_CALIBRATION_FILE=params.json vllm serve Qwen/Qwen3-8B
@@ -24,7 +25,6 @@ Usage:
 
 import argparse
 import json
-import os
 import platform
 import time
 import uuid
@@ -50,11 +50,12 @@ class HardwareParams:
 
     All time values are in seconds.
     """
+
     # Core parameters
     alpha_p: float  # Prefill fixed overhead (seconds)
-    beta_p: float   # Prefill per-token cost (seconds/token)
+    beta_p: float  # Prefill per-token cost (seconds/token)
     alpha_d: float  # Decode fixed overhead (seconds)
-    beta_d: float   # Decode per-batch cost (seconds/request)
+    beta_d: float  # Decode per-batch cost (seconds/request)
 
     # Metadata
     model: str = ""
@@ -65,7 +66,7 @@ class HardwareParams:
 
     # Fitting quality metrics
     prefill_r2: float = 0.0  # R² score for prefill fit
-    decode_r2: float = 0.0   # R² score for decode fit
+    decode_r2: float = 0.0  # R² score for decode fit
 
     # Calibration config
     prefill_sizes: list[int] = field(default_factory=list)
@@ -78,7 +79,7 @@ class HardwareParams:
         filepath.parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, "w") as f:
             json.dump(asdict(self), f, indent=2)
-        logger.info(f"Hardware parameters saved to {filepath}")
+        logger.info("Hardware parameters saved to %s", filepath)
 
     @classmethod
     def load(cls, filepath: str | Path) -> "HardwareParams":
@@ -130,7 +131,6 @@ def linear_regression(x: np.ndarray, y: np.ndarray) -> tuple[float, float, float
     Returns:
         (alpha, beta, r2_score)
     """
-    n = len(x)
     x_mean = np.mean(x)
     y_mean = np.mean(y)
 
@@ -191,16 +191,15 @@ class HardwareCalibratorFullIter:
 
     def setup(self):
         """Initialize the engine."""
-        from vllm import SamplingParams
         from vllm.engine.arg_utils import EngineArgs
         from vllm.utils.torch_utils import set_default_torch_num_threads
         from vllm.v1.engine.core import EngineCore
         from vllm.v1.executor import Executor
 
-        logger.info(f"Initializing model: {self.model}")
-        logger.info(f"  dtype: {self.dtype}")
-        logger.info(f"  max_num_batched_tokens: {self.max_num_batched_tokens}")
-        logger.info(f"  max_num_seqs: {self.max_num_seqs}")
+        logger.info("Initializing model: %s", self.model)
+        logger.info("  dtype: %s", self.dtype)
+        logger.info("  max_num_batched_tokens: %d", self.max_num_batched_tokens)
+        logger.info("  max_num_seqs: %d", self.max_num_seqs)
 
         engine_args = EngineArgs(
             model=self.model,
@@ -247,9 +246,7 @@ class HardwareCalibratorFullIter:
             cache_salt=None,
             data_parallel_rank=None,
         )
-        self.engine_core.add_request(
-            *self.engine_core.preprocess_add_request(request)
-        )
+        self.engine_core.add_request(*self.engine_core.preprocess_add_request(request))
         return req_id
 
     def _run_single_step_full_iter(self) -> tuple[int, int, int, float]:
@@ -348,11 +345,12 @@ class HardwareCalibratorFullIter:
             try:
                 self.engine_core.step_fn()
             except (KeyError, RuntimeError) as e:
-                logger.warning(f"Error during prefill preparation: {e}")
+                logger.warning("Error during prefill preparation: %s", e)
                 return False
 
         num_in_decode = sum(
-            1 for req in self.engine_core.scheduler.running
+            1
+            for req in self.engine_core.scheduler.running
             if req.num_computed_tokens >= req.num_prompt_tokens
         )
 
@@ -388,13 +386,14 @@ class HardwareCalibratorFullIter:
 
         logger.info("Measuring prefill times (full iteration)...")
         for prefill_size in self.prefill_sizes:
-            times = []
+            times: list[float] = []
 
             for i in range(self.num_warmup + self.num_iterations):
                 self._cleanup_all_requests()
 
                 # Small warmup before each measurement
                 self._add_request(256, max_tokens=5)
+                assert self.engine_core is not None, "setup() must be called first"
                 for _ in range(3):
                     if not self.engine_core.scheduler.has_requests():
                         break
@@ -411,7 +410,7 @@ class HardwareCalibratorFullIter:
             if times:
                 median_time = float(np.median(times))
                 results.append((prefill_size, median_time))
-                logger.info(f"  Prefill {prefill_size} tokens: {median_time:.3f}ms")
+                logger.info("  Prefill %d tokens: %.3fms", prefill_size, median_time)
 
         return results
 
@@ -425,14 +424,14 @@ class HardwareCalibratorFullIter:
 
         logger.info("Measuring decode times (full iteration)...")
         for num_decode in self.decode_counts:
-            times = []
+            times: list[float] = []
 
             for i in range(self.num_warmup + self.num_iterations):
                 self._cleanup_all_requests()
 
                 success = self._prepare_decode_requests(num_decode)
                 if not success:
-                    logger.warning(f"  Could not prepare {num_decode} decode requests")
+                    logger.warning("  Could not prepare %d decode requests", num_decode)
                     break
 
                 # Use full-iteration timing
@@ -444,7 +443,7 @@ class HardwareCalibratorFullIter:
             if times:
                 median_time = float(np.median(times))
                 results.append((num_decode, median_time))
-                logger.info(f"  Decode batch={num_decode}: {median_time:.3f}ms")
+                logger.info("  Decode batch=%d: %.3fms", num_decode, median_time)
 
         return results
 
@@ -495,9 +494,13 @@ class HardwareCalibratorFullIter:
             num_iterations=self.num_iterations,
         )
 
-        logger.info(f"\nCalibration complete (full iteration):")
-        logger.info(f"  Prefill: T_p = {alpha_p:.6f} + {beta_p:.8f} × L  (R²={r2_p:.4f})")
-        logger.info(f"  Decode:  T_d = {alpha_d:.6f} + {beta_d:.8f} × k  (R²={r2_d:.4f})")
+        logger.info("\nCalibration complete (full iteration):")
+        logger.info(
+            "  Prefill: T_p = %.6f + %.8f x L  (R^2=%.4f)", alpha_p, beta_p, r2_p
+        )
+        logger.info(
+            "  Decode:  T_d = %.6f + %.8f x k  (R^2=%.4f)", alpha_d, beta_d, r2_d
+        )
 
         return params
 
@@ -559,7 +562,10 @@ def calibrate_hardware_params_full_iter(
 def main():
     """CLI entry point for calibration (full iteration version)."""
     parser = argparse.ArgumentParser(
-        description="Calibrate hardware parameters for the P/D Competition Scheduler (Full Iteration Version)"
+        description=(
+            "Calibrate hardware parameters for the P/D Competition Scheduler "
+            "(Full Iteration Version)"
+        )
     )
     parser.add_argument(
         "--model",
@@ -621,10 +627,17 @@ def main():
         default=0.9,
         help="GPU memory utilization (default: 0.9)",
     )
-    # Default output to pd_exp/outputs/pd_calibration_full_iter.json
-    default_output = Path(__file__).parent.parent.parent.parent.parent / "pd_exp" / "outputs" / "pd_calibration_full_iter.json"
+    # Default output: reproduce/calibration/pd_calibration_full_iter_<model>_<GPU>.json.
+    from vllm.v1.core.sched.calibration import _detect_gpu_tag
+
+    repo_root = Path(__file__).resolve().parents[4]
+    cal_dir = repo_root / "reproduce" / "calibration"
+    if not cal_dir.exists():
+        cal_dir = Path.cwd()
+    default_output = cal_dir / f"pd_calibration_full_iter_{_detect_gpu_tag()}.json"
     parser.add_argument(
-        "--output", "-o",
+        "--output",
+        "-o",
         type=str,
         default=str(default_output),
         help=f"Output file path (default: {default_output})",
@@ -660,9 +673,9 @@ def main():
     print("  - sample_tokens() (if needed)")
     print("  - scheduler.update_from_output()")
     print("")
-    print(f"To use these parameters, set:")
+    print("To use these parameters, set:")
     print(f"  export VLLM_PD_CALIBRATION_FILE={args.output}")
-    print(f"\nOr set environment variables directly:")
+    print("\nOr set environment variables directly:")
     print(f"  export VLLM_PD_ALPHA_P={params.alpha_p}")
     print(f"  export VLLM_PD_BETA_P={params.beta_p}")
     print(f"  export VLLM_PD_ALPHA_D={params.alpha_d}")

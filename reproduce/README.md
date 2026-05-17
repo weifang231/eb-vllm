@@ -11,13 +11,18 @@ scripts that reproduce every figure and table in the paper. Each
 git clone https://github.com/weifang231/eb-vllm
 cd eb-vllm
 git checkout release/icml2026
-pip install -e .                # vLLM editable install (~20 min compile)
+python -m venv .venv && source .venv/bin/activate
+pip install torch                                       # match your CUDA
+VLLM_USE_PRECOMPILED=1 pip install -e . --no-build-isolation
+                                # ~30 s; fetches all 8 .so (incl. FA3) from
+                                # the official vLLM wheel — see warning below
 pip install matplotlib numpy pandas scipy
 
-# 2. One-time per-(model, GPU) cost-model calibration
-python -m vllm.v1.core.sched.calibration \
-    --model Qwen/Qwen3-8B \
-    --output reproduce/calibration/pd_calibration_Qwen3-8B_<GPU_TAG>.json
+# 2. One-time per-(model, GPU) cost-model calibration. The default --output
+# auto-detects the GPU and writes to reproduce/calibration/pd_calibration_<model>_<GPU>.json,
+# which is exactly where the runner scripts (resolve_calibration in
+# common/common_cfr.sh) look for it.
+python -m vllm.v1.core.sched.calibration --model Qwen/Qwen3-8B
 # (Sample H200 / RTX PRO 6000 calibrations shipped under reproduce/calibration/.)
 
 # 3. Run one paper artifact (example: Table 3 H200, Qwen3-8B ShareGPT)
@@ -28,6 +33,15 @@ IGNORE_EOS=true CUSTOM_OUTPUT_LEN=500 MODEL=Qwen/Qwen3-8B \
 # 4. Analyze / plot
 python analyze_grid_search.py ../outputs/optimal_only_sharegpt_prompts_Qwen3-8B_*
 ```
+
+> **⚠ Do NOT drop `VLLM_USE_PRECOMPILED=1`.** A locally-compiled
+> `vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so` causes a ~10× throughput
+> regression (measured H200 + Qwen3-8B ShareGPT: 15.6 → 1.5 RPS, TPOT
+> 339 ms → 4158 ms). eb-vllm's diff vs upstream vLLM is **pure-Python**
+> (`vllm/v1/core/sched/` + `reproduce/`), so the upstream precompiled FA3
+> binary is ABI-compatible. Only build locally if you have modified `csrc/`,
+> and in that case overwrite `vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so`
+> with the version extracted from the official wheel afterwards.
 
 **Workload protocol** (paper §4.1 — match `IGNORE_EOS` + `CUSTOM_OUTPUT_LEN` per
 workload):

@@ -689,6 +689,41 @@ GPUS=0 SCHEDULERS=pd_ifr MODEL=Qwen/Qwen3-30B-A3B \
 
 ---
 
+# Output-directory map
+
+For each paper figure / table, the bench output directory the data was
+extracted from. All paths are relative to `reproduce/`. Note: these
+directories are all `.gitignore`d (see `reproduce/outputs/` rule in the root
+`.gitignore`), so a fresh `git clone` will not contain them — they are
+re-generated when the corresponding `run_*.sh` is executed.
+
+## Canonical outputs (paper figures and tables)
+
+| Subdirectory (under `reproduce/`) | Backs paper artifact | Size |
+|---|---|---:|
+| `outputs/grid_search_sharegpt_prompts_Qwen3-8B_Con_2048_Prompts_4000/` | Tables 2-3 ShareGPT grid (Qwen3-8B) | 3.6G |
+| `outputs/grid_search_longbench_prefill_Qwen3-8B_Con_2048_Prompts_4000/` | Tables 2-3 LongBench grid (Qwen3-8B) | 367M |
+| `outputs/optimal_only_numina_math_prompts_Qwen3-8B_Con_2048_Prompts_4000/` | Tables 2-3 NumimaMath (Qwen3-8B) | 1.4G |
+| `outputs/grid_search_sharegpt_prompts_Qwen3-30B-A3B_Con_2048_Prompts_4000/` | Tables 2-3 ShareGPT grid (Qwen3-30B-A3B add-on) | 1.5G |
+| `outputs/optimal_only_sharegpt_prompts_Qwen3-30B-A3B_Con_2048_Prompts_4000_paperv2/` | Tables 2-3 30B ShareGPT (paper §4.1 protocol) | 106M |
+| `outputs/optimal_only_longbench_prefill_Qwen3-30B-A3B_Con_2048_Prompts_4000_paperv2/` | Tables 2-3 30B LongBench (paper §4.1 protocol) | 6.9M |
+| `outputs/optimal_only_numina_math_prompts_Qwen3-30B-A3B_Con_2048_Prompts_4000_paperv2/` | Tables 2-3 30B NumimaMath baseline (paper §4.1 protocol) | 488M |
+| `outputs/optimal_only_numina_math_prompts_Qwen3-30B-A3B_Con_2048_Prompts_4000_paperv2_tf07/` | Tables 2-3 30B NumimaMath pd_ifr (θ_floor=0.7, paper §4.1 protocol) | 459M |
+| `outputs/optimal_only_sharegpt_prompts_Llama-3.1-8B-Instruct_Con_2048_Prompts_4000/` | Figure 7 cross-model (Llama-3.1-8B) | 179M |
+| `outputs/optimal_only_sharegpt_prompts_Mathstral-7B-v0.1_Con_2048_Prompts_4000/` | Figure 7 cross-model (Mathstral-7B) | 150M |
+| `outputs/optimal_only_sharegpt_prompts_Qwen2.5-Coder-7B_Con_2048_Prompts_4000/` | Figure 7 cross-model (Qwen2.5-Coder-7B) | 384M |
+| `outputs/optimal_only_sharegpt_prompts_DeepSeek-R1-Distill-Qwen-7B_Con_2048_Prompts_4000/` | Figure 7 cross-model (DeepSeek-R1-Distill-Qwen-7B) | 470M |
+| `outputs/2gpu_comparison_Qwen3-8B_c64_20260513_171124/` | §4.4 Disaggregation 2-GPU comparison | 6.4M |
+| `outputs/disagg_baseline_Qwen3-8B_20260513_171121/` | §4.4 Disaggregation vLLM-native P/D (3 phases, c=2048 OOM) | 42M |
+| `outputs/long_context_Qwen3-8B_i32768_o256_c8_20260513_160103/` | §4.4 Long-context (combined_ctx_comparison_tok1024) | 5.8M |
+| `validation/outputs/controller_validation/H200_Qwen3-8B/` | Figure 3 (validation grid) | (subset of 2.9G `validation/outputs/`) |
+| `synthetic_e2e/outputs/e2e_grid_search/H200_Qwen3-8B/` | Figure 4 (synthetic e2e) | (subset of 2.7G `synthetic_e2e/outputs/`) |
+| `eb_plus/traffic/outputs/adaptive_selector_table4_c{32,512,2048}/H200_Qwen3-8B/` | Table 4 (EB⁺ traffic-level) | (subset of 881M `eb_plus/traffic/outputs/`) |
+| `eb_plus/outputs/distribution_shift_Qwen3-8B_20260514_081117/` | Table 5 distribution shift (canonical rerun, 05-14) | (subset of 3.2G `eb_plus/outputs/`) |
+| `eb_plus/outputs/concurrency_shift_Qwen3-8B_20260513_160751/` | Table 5 concurrency shift | (subset of 3.2G `eb_plus/outputs/`) |
+| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/` | Tables 2-3 WildChat optimal-only | (subset of 1.5G `real_workloads/outputs/`) |
+| `real_workloads/outputs/concurrency_sweep_wildchat_Qwen3-8B_h200/` | Figures 5-6 WildChat concurrency sweep | (subset of 1.5G `real_workloads/outputs/`) |
+
 # Summary table
 
 | Paper artifact | Section | Status | Notes |
