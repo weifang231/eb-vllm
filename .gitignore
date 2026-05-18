@@ -267,3 +267,9 @@ reproduce/**/*_repro.pdf
 # Calibration JSONs: tiny (~500 bytes) and reference values are committed;
 # new ones (generated locally per (model, GPU)) are tracked too if you want
 # them shared. Override per-file with .gitignore if needed.
+
+# Downloaded benchmark datasets (hundreds of MB; fetched on demand, never commit)
+reproduce/ShareGPT*.json
+reproduce/**/ShareGPT*.json
+reproduce/wildchat_multiturn.json
+reproduce/**/wildchat_multiturn.json
