@@ -146,6 +146,23 @@ lookup_bn() {
         RTXPRO6000:Qwen3-8B:numina_math:pd_ratio)     echo "8192,256"   ;;  # v0
         RTXPRO6000:Qwen3-8B:numina_math:pd_ifr)       echo "4096,256"   ;;  # EB(k_hat^*)
 
+        # ===== RTX PRO 6000, Qwen3-30B-A3B (paper Appendix tab:optimal-config-a6000) =====
+        RTXPRO6000:Qwen3-30B-A3B:sharegpt:baseline)     echo "8192,1536"  ;;  # v1
+        RTXPRO6000:Qwen3-30B-A3B:sharegpt:pd_ratio)     echo "4096,1024"  ;;  # v0
+        RTXPRO6000:Qwen3-30B-A3B:sharegpt:pd_ifr)       echo "10240,1024" ;;  # EB(k_hat^*)
+
+        RTXPRO6000:Qwen3-30B-A3B:longbench:baseline)    echo "14336,2048" ;;  # v1
+        RTXPRO6000:Qwen3-30B-A3B:longbench:pd_ratio)    echo "14336,256"  ;;  # v0
+        RTXPRO6000:Qwen3-30B-A3B:longbench:pd_ifr)      echo "16384,256"  ;;  # EB(k_hat^*)
+
+        RTXPRO6000:Qwen3-30B-A3B:wildchat:baseline)     echo "14336,1024" ;;  # v1
+        RTXPRO6000:Qwen3-30B-A3B:wildchat:pd_ratio)     echo "10240,512"  ;;  # v0
+        RTXPRO6000:Qwen3-30B-A3B:wildchat:pd_ifr)       echo "18432,512"  ;;  # EB(k_hat^*)
+
+        RTXPRO6000:Qwen3-30B-A3B:numina_math:baseline)  echo "14336,256"  ;;  # v1
+        RTXPRO6000:Qwen3-30B-A3B:numina_math:pd_ratio)  echo "10240,512"  ;;  # v0
+        RTXPRO6000:Qwen3-30B-A3B:numina_math:pd_ifr)    echo "16384,256"  ;;  # EB(k_hat^*)
+
         # ===== H200, cross-model (paper §4.5.2 Figure 7 — paper uses RTX PRO 6000,
         # but we report H200 numbers using Qwen3-8B's (B, N) as proxy since paper
         # Figure 7 doesn't publish per-model H200 optima for these dense 7-8B models).

@@ -22,6 +22,7 @@ ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"   # canonical path (no trailing /reproduc
 
 MODELS="${MODELS:-Qwen/Qwen3-8B Qwen/Qwen3-30B-A3B}"
 MAX_GPUS="${MAX_GPUS:-$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)}"
+GPU_OFFSET="${GPU_OFFSET:-0}"  # Start physical GPU index (e.g. 2 to skip busy 0/1)
 PHASES="${PHASES:-ALL}"        # A,B,C,D,E or ALL
 LOGDIR="${SCRIPT_DIR}/outputs/_runner_logs/oneclick_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$LOGDIR"
@@ -128,6 +129,7 @@ phase_calibration() {
         cal_path="reproduce/calibration/pd_calibration_${short}_${GPU_TAG}.json"
         if skip_if_exists "$cal_path" "calibration for $short on $GPU_TAG"; then continue; fi
         log "  Running calibration for $MODEL ..."
+        CUDA_VISIBLE_DEVICES="$GPU_OFFSET" \
         python -m vllm.v1.core.sched.calibration \
             --model "$MODEL" \
             --output "$cal_path" \
@@ -160,7 +162,7 @@ phase_A_real_workloads() {
             out="$ROOT/reproduce/outputs/optimal_only_$(basename "$ds" .jsonl)_${short}_Con_2048_Prompts_4000_${GPU_TAG}/.done"
             if skip_if_exists "$out" "Table 2/3 $short × $wl"; then continue; fi
             log "  Running $short × $wl (out_len=$ol) ..."
-            GPUS=$(seq -s, 0 $((MAX_GPUS-1))) \
+            GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) \
                 SCHEDULERS="baseline pd_ifr" IGNORE_EOS=true CUSTOM_OUTPUT_LEN=$ol \
                 OUTPUT_DIR_SUFFIX="_${GPU_TAG}" MODEL="$MODEL" \
                 bash run_optimal_only.sh "$ds" "$MAX_GPUS" \
@@ -173,7 +175,7 @@ phase_A_real_workloads() {
         local wc_out="$ROOT/reproduce/real_workloads/outputs/multiturn_wildchat_multiturn_${short}_Clients_2048_MaxTurns_12/.done"
         if skip_if_exists "$wc_out" "Table 2/3 $short × wildchat"; then continue; fi
         log "  Running $short × wildchat (multi-turn) ..."
-        GPUS=$(seq -s, 0 $((MAX_GPUS-1))) SCHEDULERS="baseline pd_ifr" MODEL="$MODEL" \
+        GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) SCHEDULERS="baseline pd_ifr" MODEL="$MODEL" \
             bash multiturn/run_optimal_only.sh ../outputs/wildchat_multiturn.json "$MAX_GPUS" \
             > "$LOGDIR/A_${short}_wildchat.log" 2>&1
         touch "$wc_out"
@@ -194,7 +196,7 @@ phase_B_synthetic() {
         out="outputs/e2e_grid_search/${GPU_TAG}_${short}/.done"
         if skip_if_exists "$out" "Fig 4 grid $short"; then continue; fi
         log "  Running Fig 4 grid for $short ..."
-        GPUS=$(seq -s, 0 $((MAX_GPUS-1))) SCHEDULERS="v1 eb_khat" MODEL="$MODEL" \
+        GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) SCHEDULERS="v1 eb_khat" MODEL="$MODEL" \
             bash run_grid_search_cfr.sh "$MAX_GPUS" \
             > "$LOGDIR/B_${short}.log" 2>&1
         touch "$out"
@@ -283,7 +285,7 @@ phase_D_eb_plus_traffic() {
         out="outputs/adaptive_selector/${GPU_TAG}_${short}/.done"
         if skip_if_exists "$out" "Table 4 $short"; then continue; fi
         log "  Running EB+ traffic for $short ..."
-        GPUS=$(seq -s, 0 $((MAX_GPUS-1))) MODEL="$MODEL" \
+        GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) MODEL="$MODEL" \
             bash run_adaptive_selector_cfr.sh "$MAX_GPUS" \
             > "$LOGDIR/D_${short}.log" 2>&1
         touch "$out"
@@ -301,7 +303,7 @@ phase_E_eb_plus_nonstat() {
     export VLLM_PD_MODE_SWITCH_DELTA="${VLLM_PD_MODE_SWITCH_DELTA:-1e-5}"
 
     # Find a free GPU (distshift takes 1 GPU, concshift takes another)
-    local DIST_GPU=0 CONC_GPU=$((MAX_GPUS > 1 ? 1 : 0))
+    local DIST_GPU=$GPU_OFFSET CONC_GPU=$((MAX_GPUS > 1 ? GPU_OFFSET + 1 : GPU_OFFSET))
 
     if ! ls outputs/distribution_shift_Qwen3-8B_*/bench_pd_auto.json 1>/dev/null 2>&1; then
         log "  Running distribution_shift on GPU $DIST_GPU ..."
@@ -334,7 +336,7 @@ phase_F_validation() {
     local out="outputs/controller_validation/${GPU_TAG}_Qwen3-8B/.done"
     if skip_if_exists "$out" "Fig 3 validation"; then return 0; fi
     log "  Running validation grid ..."
-    GPUS=$(seq -s, 0 $((MAX_GPUS-1))) MODEL=Qwen/Qwen3-8B \
+    GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) MODEL=Qwen/Qwen3-8B \
         bash run_validation_cfr.sh "$MAX_GPUS" \
         > "$LOGDIR/F_validation.log" 2>&1
     touch "$out"

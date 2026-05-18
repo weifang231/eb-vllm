@@ -355,6 +355,13 @@ run_experiment() {
             export VLLM_PD_K_MODE=ifr
             unset VLLM_PD_K_RATIO VLLM_PD_K_STAR
             ;;
+        pd_auto)
+            export VLLM_USE_PD_SCHEDULER=1
+            export VLLM_PD_SCHEDULER_MODE=auto
+            export VLLM_PD_K_MODE=ifr
+            export VLLM_PD_IFR_WINDOW_SIZE=${VLLM_PD_IFR_WINDOW_SIZE:-500}
+            unset VLLM_PD_K_RATIO VLLM_PD_K_STAR
+            ;;
     esac
 
     wait_for_gpu_memory $gpu_id 60 || return 1
