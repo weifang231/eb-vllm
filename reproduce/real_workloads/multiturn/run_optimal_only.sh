@@ -93,7 +93,7 @@ case "$GPU_TAG_DETECTED:$MODEL_TAG:$WORKLOAD" in
     # Paper doesn't publish per-model RTX PRO 6000 optima for these dense ~7-8B
     # models, so we proxy from Qwen3-8B's wildchat optima above (same hardware,
     # same workload, similar param count).
-    RTXPRO6000:Meta-Llama-3.1-8B-Instruct:wildchat|RTXPRO6000:Mistral-7B-v0.1:wildchat|RTXPRO6000:Mistral-7B-Instruct-v0.1:wildchat|RTXPRO6000:Mathstral-7B-v0.1:wildchat|RTXPRO6000:Qwen2.5-Coder-7B:wildchat|RTXPRO6000:DeepSeek-R1-Distill-Qwen-7B:wildchat)
+    RTXPRO6000:Meta-Llama-3.1-8B-Instruct:wildchat|RTXPRO6000:Mathstral-7B-v0.1:wildchat|RTXPRO6000:Qwen2.5-Coder-7B:wildchat|RTXPRO6000:DeepSeek-R1-Distill-Qwen-7B:wildchat)
         BN_BASELINE="18432 1024"    # v1     (proxy from Qwen3-8B)
         BN_PD_RATIO="18432 1024"    # v0     (proxy)
         BN_PD_IFR="10240 1024"      # EB(k_hat^*)   (proxy)

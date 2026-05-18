@@ -249,6 +249,10 @@ reproduce/**/fig_*.pdf
 reproduce/**/fig_*.png
 reproduce/**/*_reproduced.pdf
 reproduce/**/*_comparison.pdf
+reproduce/**/*_comparison.png
+reproduce/**/*_new.pdf
+reproduce/**/*_new.png
+reproduce/scalability/scalmodel.pdf
 
 # Local re-runs of paper benchmarks (e.g. *_repro.json/png/pdf produced when
 # a developer regenerates a figure to sanity-check; the committed reference
@@ -267,6 +271,13 @@ reproduce/**/*_repro.pdf
 # Calibration JSONs: tiny (~500 bytes) and reference values are committed;
 # new ones (generated locally per (model, GPU)) are tracked too if you want
 # them shared. Override per-file with .gitignore if needed.
+# Vestigial: Mistral-7B-v0.1 (base) and Mistral-7B-Instruct-v0.1 were tried
+# during development as fallbacks before settling on the paper's actual
+# scalability set (Mathstral-7B-v0.1 + the other 3 cross-model entries).
+# Paper does NOT use either Mistral variant — these calibrations shouldn't
+# ship.
+reproduce/calibration/pd_calibration_Mistral-7B-v0.1_*.json
+reproduce/calibration/pd_calibration_Mistral-7B-Instruct-v0.1_*.json
 
 # Downloaded benchmark datasets (hundreds of MB; fetched on demand, never commit)
 reproduce/ShareGPT*.json
