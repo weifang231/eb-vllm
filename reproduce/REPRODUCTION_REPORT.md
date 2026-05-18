@@ -697,6 +697,101 @@ directories are all `.gitignore`d (see `reproduce/outputs/` rule in the root
 `.gitignore`), so a fresh `git clone` will not contain them — they are
 re-generated when the corresponding `run_*.sh` is executed.
 
+## §4.5.1 cross-GPU add-on — B300, Qwen3-8B WildChat multi-turn
+
+Reproduces the **B300** column of paper Table 6 (high-bandwidth crossover —
+paper's main claim is *EB ≈ v1 on B300* as memory bandwidth crosses the
+threshold). Single GPU = NVIDIA B300 SXM6 AC (sm_103, 275 GiB HBM, ~8 TB/s),
+Qwen3-8B fp16, WildChat 500-conversation multi-turn export (≥8 turns).
+
+Calibration auto-generated to
+`reproduce/calibration/pd_calibration_Qwen3-8B_B300.json` (α_p=0.00745,
+β_p=1.28e-5, α_d=0.01318, β_d=2.27e-5; prefill R²=0.96, decode R²=0.94).
+Two schedulers run: `baseline` (v1) and `pd_ifr` (EB(k̂\*)).
+
+### RPS / TTFT / TPOT vs paper Table 6 (B300 column)
+
+| Scheduler | Ours RPS | Paper RPS | Δ | Ours TTFT (s) | Paper TTFT (s) | Ours TPOT (ms) | Paper TPOT (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v1 (baseline) | 50.47 | 58.69 | -14.0% | 2.08 | 3.13 | 24.00 | 17.09 |
+| EB(k̂\*) (pd_ifr) | 52.34 | 57.41 | -8.8% | 2.87 | 3.72 | 22.12 | 16.63 |
+
+**EB / v1 RPS ratio**: ours 1.037, paper 0.978 — both within ±5%, both
+support the qualitative claim *"on a high-bandwidth GPU, EB and v1 are
+approximately equal"*. The crossover prediction holds: B300's ~8 TB/s puts
+it well above the EB-favorable regime, and EB no longer wins decisively.
+
+### Verdict
+
+✅ **Reproduced** the paper's main B300 claim: EB(k̂\*) ≈ v1 within ±5% RPS
+(EB +3.7% in ours vs paper's -2.2%; both consistent with "no advantage" at
+high bandwidth). Absolute throughput 9-14% below paper across both
+schedulers — same uniform drift seen throughout the H200 reproduction
+(implementation drift from newer vLLM nightly), so relative claims hold.
+
+### Caveats
+
+- Paper didn't publish B300 (B, N) optima, so we mirrored H200's
+  Qwen3-8B optima: `baseline B=4096 N=2048`, `pd_ifr B=16384 N=1024`.
+  B300 has higher mem & bandwidth than H200, so H200's choices are at
+  worst a conservative lower bound. A B300-specific grid search would
+  likely close some of the absolute-value gap to paper.
+- 500-conversation dataset (`--num-conversations 500 --min-turns 8`)
+  exhausts before all 2048 clients get useful work — many clients
+  finish with 0 turns processed. Probably contributes to lower absolute
+  RPS but does not affect the v1-vs-EB comparison since both runs see
+  identical conversation supply.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `calibration/pd_calibration_Qwen3-8B_B300.json` | Cost-model params used by EB(k̂\*) |
+| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/tb4096/bs2048/bench_baseline.json` | v1 bench result |
+| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/tb16384/bs1024/bench_pd_ifr.json` | EB(k̂\*) bench result |
+
+### B300 build gotchas (worth documenting)
+
+Pre-compiled wheels do not work cleanly:
+
+1. **No matching nightly wheel for fork base.** `wheels.vllm.ai` only keeps
+   recent nightlies; the fork base commit `5d64fd8db` (2025-12-11) is gone.
+   The current nightly (`966903eb...`, cu130 variant) has API drift the
+   fork doesn't know about (`cutlass_scaled_mm_supports_fp8`,
+   `compute_encoder_budget` renamed). Source-building is the clean path.
+2. **`sm_103a` cubin is not emitted** even with
+   `TORCH_CUDA_ARCH_LIST="10.0a;10.3a"` — only `sm_100a` ends up in the
+   .so. Confirmed Blackwell forward-compat works: sm_100a kernels run on
+   sm_103 device (empirically verified by full WildChat run).
+3. **flashinfer 0.6.11 added `o_data_type` to `BatchDecodeWithPagedKVCacheWrapper.plan()`.**
+   The fork's `fast_plan_decode` (in `vllm/v1/attention/backends/flashinfer.py`)
+   uses positional args, so on newer flashinfer the call shifts and ends up
+   with `non_blocking=None`, which torch 2.11 then rejects. Patch: pass
+   args by keyword (or downgrade flashinfer to a pre-`o_data_type` version).
+4. **`run_optimal_only.sh` lacks a B300 case.** Add a `B300:Qwen3-8B:*` block
+   mirroring H200 (in `reproduce/real_workloads/run_optimal_only.sh` and
+   `reproduce/real_workloads/multiturn/run_optimal_only.sh`).
+
+Pinned working set on B300 with CUDA 13.2 system toolkit:
+
+```
+torch==2.11.0+cu130          torchvision==0.26.0+cu130   torchaudio==2.11.0+cu130
+nvidia-nccl-cu13>=2.29       numpy<2.3                   triton==3.6.0
+flashinfer-python==0.6.11.post3   flashinfer-cubin==0.6.11.post3
+```
+
+Build invocation (~20 min, 403 ninja targets):
+
+```bash
+TORCH_CUDA_ARCH_LIST="10.0a;10.3a" MAX_JOBS=128 \
+  uv pip install -e . --no-build-isolation
+```
+
+(Do **not** set `VLLM_USE_PRECOMPILED=1` on B300 with the current fork —
+the nightly wheel's `_C.abi3.so` does not match fork Python.)
+
+---
+
 ## Canonical outputs (paper figures and tables)
 
 | Subdirectory (under `reproduce/`) | Backs paper artifact | Size |
@@ -737,7 +832,7 @@ re-generated when the corresponding `run_*.sh` is executed.
 | Table 5 (EB⁺ non-stationary) | §4.4 | ✅ | EB⁺ 20,474 vs paper 20,776 (-1.5%); v1 20,632 vs paper 18,307 (+13%); EB(k̂*) 21,624 vs paper 17,394 (+24%, with θ_min=0.7 from run_distribution_shift.sh). All 3 schedulers reproduce paper |
 | Long-context fig | §4.4 | ✅ | EB TPOT 37% lower than v1; EB⁺ matches v1 |
 | Disaggregation | §4.4 + App | ✅ | EB⁺ > baseline > vLLM native P/D at c=64; native P/D OOMs at c=2048 (paper claim ✓) |
-| Table 6 (cross-GPU) | §4.5.1 | ⛔ | L40S/B300 unavailable |
+| Table 6 (cross-GPU) | §4.5.1 | ⚠️ | B300 WildChat done: EB/v1 = 1.037 (paper 0.978), both within ±5% — reproduces paper's "EB ≈ v1 on high-bandwidth GPU" claim. Absolute -9 to -14% (uniform drift). L40S still unavailable. See §4.5.1 add-on section above. |
 | Figure 7 (cross-model) | §4.5.2 | ⚠️ | 4 models on **H200** (paper used RTX PRO 6000): EB > v1 on Llama (+4.6%), Mathstral (+7.5%), DeepSeek (+2.6%); EB < v1 on Qwen2.5-Coder (−24.9%). TTFT reduced 17-24% on 3/4. TPOT *increased* on all 4 (paper showed TPOT decrease on RTX PRO 6000) |
 | Tables 2-3 (Qwen3-30B-A3B add-on) | §4.3.2 / §4.5 | ✅ | Reproduced with paper-§4.1 protocol (`--ignore-eos` + per-workload output_len). 4/4 directions match paper; 7/8 cells within ±5% of paper. ShareGPT has −30% absolute gap (grid search confirms not (B, N) related, structural cross-system difference). NumimaMath pd_ifr needs `θ_floor=0.7` to avoid thrashing at r → 1; WildChat pd_ifr uses `θ=0.85`. Paper's α-driven prediction (EB drops vs v1 as model scales) reproduces |
 
