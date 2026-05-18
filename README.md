@@ -144,7 +144,7 @@ The full online controller (`_update_params_online`) runs in two paths: a **hot 
 
 ## 🧪 Reproducing the paper
 
-See [`reproduce/REPRODUCTION_REPORT.md`](reproduce/REPRODUCTION_REPORT.md) for the per-figure reproduction commands and expected results.
+See [`reproduce/REPRODUCE.md`](reproduce/REPRODUCE.md) for the end-to-end recipe with expected wall-clock times. Per-section subdirectories contain the runner scripts, analysis tools, and plot scripts for each figure/table:
 
 | Paper section | Subdirectory |
 |---|---|
