@@ -3,10 +3,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dual-panel README header: EB+ Throughput gain + TPOT reduction vs GPU bandwidth.
 
-Numbers reflect EB+ (hybrid) vs v1 (MB) on WildChat-like workloads. Because
-EB+ by construction picks max(EB, MB), throughput on high-bandwidth GPUs
-(H200, B300) is approximately tied with v1 (gains near 0%), while on
-bandwidth-constrained GPUs (L40S, RTX PRO 6000) it captures EB's gain.
+Numbers reflect EB+ (hybrid) vs v1 (MB) on the WildChat workload (paper
+Tables 5 & 6 for Qwen3-8B). Because EB+ by construction picks max(EB, MB),
+it tracks EB's gain on bandwidth-constrained GPUs (L40S, RTX PRO 6000) and
+stays close to v1 on high-bandwidth GPUs (H200, B300).
 """
 
 import matplotlib.pyplot as plt
@@ -24,11 +24,13 @@ plt.rcParams.update(
 # (GPU, BW TB/s, EB+ Throughput gain %, EB+ TPOT reduction %)
 # Ordered from highest bandwidth (left) to lowest (right) so the bars
 # rise left-to-right, visualizing: as bandwidth shrinks, EB+ wins more.
+# Values from paper Table 5 (H200, RTX PRO 6000 WildChat) and Table 6
+# (L40S, B300 scalability).
 data = [
-    ("B300", 8.0, 0.0, 2.4),
-    ("H200", 4.8, 2.2, 36.1),
-    ("RTX PRO 6000", 1.792, 11.8, 34.2),
-    ("L40S", 0.864, 42.3, 27.5),
+    ("B300", 8.0, 3.7, 7.8),
+    ("H200", 4.8, 3.0, 35.7),
+    ("RTX PRO 6000", 1.792, 11.3, 34.7),
+    ("L40S", 0.864, 41.9, 27.2),
 ]
 
 fig, (axL, axR) = plt.subplots(1, 2, figsize=(13.5, 4.8), dpi=150)
@@ -73,8 +75,7 @@ axL.axhline(0, color="black", linewidth=0.9, zorder=1)
 
 for i, (bar, g) in enumerate(zip(bars_th, tps)):
     h = bar.get_height()
-    # Show ≈ 0% for the high-bandwidth B300 cell where EB+ effectively ties v1
-    label = "≈ 0%" if gpus[i] == "B300" else f"{g:+.1f}%"
+    label = f"{g:+.1f}%"
     if h >= 0:
         axL.text(
             bar.get_x() + bar.get_width() / 2,

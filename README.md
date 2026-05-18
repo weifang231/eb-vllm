@@ -25,13 +25,13 @@ EB⁺ vs vLLM v1 (MB) — EB⁺ adaptively picks the better of {EB, MB} per regi
 
 | Hardware | Throughput vs v1 (MB) | TPOT vs v1 (MB) |
 |---|---|---|
-| L40S (0.864 TB/s) | **+42.3%** | **−27.5%** |
-| RTX PRO 6000 (1.792 TB/s) | **+11.8%** | **−34.2%** |
-| H200 (4.8 TB/s) | **+2.2%** | **−36.1%** |
-| B300 (8.0 TB/s) | ≈ 0% | **−2.4%** |
-| Non-stationary traffic (RTX PRO 6000) | **+37.5%** (distribution shift) | **−43%** (distribution shift) |
+| L40S (0.864 TB/s) | **+41.9%** | **−27.2%** |
+| RTX PRO 6000 (1.792 TB/s) | **+11.3%** | **−34.7%** |
+| H200 (4.8 TB/s) | **+3.0%** | **−35.7%** |
+| B300 (8.0 TB/s) | **+3.7%** | **−7.8%** |
+| Non-stationary traffic (RTX PRO 6000) | **+36.4%** (distribution shift) | **−43%** (distribution shift) |
 
-Source: paper §4.3–§4.5. EB⁺ recovers the underlying EB(k̂\*) gains on bandwidth-constrained GPUs (L40S, RTX PRO 6000) and falls back to MB-equivalent throughput on high-bandwidth GPUs (H200, B300).
+Source: paper §4.3–§4.5. EB⁺ recovers the underlying EB(k̂\*) gains on bandwidth-constrained GPUs (L40S, RTX PRO 6000) and stays competitive on high-bandwidth GPUs (H200, B300) by tracking whichever single-mode scheduler wins each regime.
 
 ---
 
@@ -39,12 +39,12 @@ Source: paper §4.3–§4.5. EB⁺ recovers the underlying EB(k̂\*) gains on ba
 
 EB(k̂\*) alone is **highly effective on bandwidth-constrained GPUs and at high concurrency**, but it has a known weakness: at low concurrency, when there is not enough decode work to keep the phase-switching pipeline busy, EB pays a cold-start cost that MB does not. **EB⁺ fixes this by evaluating the closed-form crossover condition online and picking the better of {EB, MB} at every update tick.**
 
-<img src="assets/eb_plus_advantage.png" width="900" alt="EB+ never loses to v1; EB(k̂*) alone can lose at low load">
+<img src="assets/eb_plus_advantage.png" width="900" alt="EB+ matches or exceeds v1 across moderate-to-high traffic and non-stationary workloads">
 
 The figure above evaluates two regimes:
 
-* **Traffic-level sensitivity** (paper Table 4). Concurrency sweep at μ\_L=512, μ\_O=256. EB(k̂\*) loses to v1 by 21–26% at c=32 because EB's fixed phase-switch overhead is not amortized over enough decode work. EB⁺ detects this regime and stays in MB, recovering v1's throughput to within 0.4%. At c=2048, EB⁺ commits to EB and gains 38% over v1 on RTX PRO 6000.
-* **Non-stationary workloads** (paper Table 5). Under sudden distribution shifts (μ\_L:1024→512→128, μ\_O:128→512→1024) or concurrency shifts (c:32→512→1024→256→2048), EB⁺ adapts online and **wins in all 4 (hardware × scenario) cells**, including +37.5% on RTX PRO 6000 under distribution shift.
+* **Traffic-level sensitivity** (paper Table 4). Concurrency sweep at μ\_L=512, μ\_O=256. At c=32 EB(k̂\*) is slightly TTFT-handicapped, so EB⁺ stays in MB and matches v1. At c=512–2048 EB⁺ commits to EB and gains **+50–63%** over v1 on RTX PRO 6000, with **1.8× lower TPOT**.
+* **Non-stationary workloads** (paper Table 5). Under sudden distribution shifts (μ\_L:1024→512→128, μ\_O:128→512→1024) or concurrency shifts (c:32→512→1024→256→2048), EB⁺ adapts online and **matches or exceeds EB(k̂\*) in all 4 (hardware × scenario) cells**, including +36.4% over v1 on RTX PRO 6000 under distribution shift.
 
 EB⁺ requires **no manual tuning**: the cost-model parameters (α\_p, α\_d, β\_p, β\_d, α\_MB, β\_MB\^e) are calibrated once per (model, GPU) in minutes; runtime updates are pure integer arithmetic.
 
