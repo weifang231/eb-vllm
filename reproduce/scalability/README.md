@@ -22,13 +22,13 @@ PyTorch 2.9 / CUDA 13.0 (paper §4.5.1 footnote).
 
 Same pipeline, on RTX PRO 6000 with WildChat, for:
 - Llama-3.1-8B-Instruct
-- Mistral-7B-v0.1
+- Mathstral-7B-v0.1
 - Qwen2.5-Coder-7B
 - DeepSeek-R1-Distill-Qwen-7B
 
 ```bash
 cd ../real_workloads
-for M in meta-llama/Llama-3.1-8B-Instruct mistralai/Mistral-7B-v0.1 \
+for M in meta-llama/Llama-3.1-8B-Instruct mistralai/Mathstral-7B-v0.1 \
          Qwen/Qwen2.5-Coder-7B-Instruct deepseek-ai/DeepSeek-R1-Distill-Qwen-7B; do
     MODEL=$M ./run_grid_search.sh    # ~6 h each
     python analyze_grid_search.py outputs/RTXPRO6000_${M##*/}/
