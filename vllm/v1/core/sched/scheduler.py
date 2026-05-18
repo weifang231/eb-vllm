@@ -212,7 +212,7 @@ class Scheduler(SchedulerInterface):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
-        # Scheduler mode: "cp" (default), "eb" (exclusive batching), "auto" (THETA+)
+        # Scheduler mode: "cp" (default), "eb" (exclusive batching), "auto" (EB+)
         # VLLM_PD_SCHEDULER_MODE takes precedence over VLLM_USE_PD_SCHEDULER
         _mode_env = os.environ.get("VLLM_PD_SCHEDULER_MODE", "")
         if _mode_env:
@@ -247,6 +247,24 @@ class Scheduler(SchedulerInterface):
             _k_ratio_env = os.environ.get("VLLM_PD_K_RATIO", "")
             self.pd_k_ratio_user_specified = bool(_k_ratio_env)
             self.pd_k_ratio = float(_k_ratio_env) if _k_ratio_env else 0.0
+
+            # auto mode needs a non-zero theta to evaluate the EB↔MB
+            # crossover (see _evaluate_mode_switch). In direct k_mode the
+            # online controllers never write pd_k_ratio, so unless the user
+            # also sets VLLM_PD_K_RATIO or VLLM_PD_K_STAR the crossover is
+            # silently skipped and auto degenerates to the cold-start mode.
+            if (self.scheduler_mode == "auto"
+                    and self.pd_k_mode == "direct"
+                    and not self.pd_k_ratio_user_specified
+                    and not self.pd_k_star_user_specified):
+                logger.warning(
+                    "VLLM_PD_SCHEDULER_MODE=auto with VLLM_PD_K_MODE=direct "
+                    "and no VLLM_PD_K_RATIO / VLLM_PD_K_STAR override: the "
+                    "MB↔EB crossover will never fire (pd_k_ratio stays 0) "
+                    "and auto will behave like cold-start mode. Set "
+                    "VLLM_PD_K_MODE=ifr (recommended) or cfr to enable "
+                    "online switching."
+                )
 
             # Hardware timing parameters (Proposition 1):
             #   Prefill: T_p = α_p + β_p * L (L = input tokens)
@@ -470,7 +488,7 @@ class Scheduler(SchedulerInterface):
         else:
             logger.info("[Scheduler] Using original vLLM scheduler")
 
-        # --- THETA+ auto mode state ---
+        # --- EB+ auto mode state ---
         if self.scheduler_mode == "auto":
             # Current active scheduler: "cp" or "eb"
             self._active_scheduler = os.environ.get(
@@ -508,7 +526,7 @@ class Scheduler(SchedulerInterface):
             self._mode_switch_count = 0
 
             logger.info(
-                f"[THETA+] Auto mode initialized: "
+                f"[EB+] Auto mode initialized: "
                 f"cold_start={self._active_scheduler}, "
                 f"cp_cost_profiled={self._cp_cost_profiled}, "
                 f"alpha_cp={self._alpha_cp:.6f}, "
@@ -1451,7 +1469,7 @@ class Scheduler(SchedulerInterface):
             # Note: IFR mode uses independent online update mechanism
             # (see _update_ifr_threshold called from hot path)
 
-        # THETA+ mode selection (only in auto mode)
+        # EB+ mode selection (only in auto mode)
         if self.scheduler_mode == "auto":
             self._evaluate_mode_switch()
 
@@ -1570,7 +1588,7 @@ class Scheduler(SchedulerInterface):
             }
             self._mode_switch_history.append(switch_record)
             logger.info(
-                f"[THETA+] Mode switch: {old_mode} -> "
+                f"[EB+] Mode switch: {old_mode} -> "
                 f"{self._active_scheduler} | "
                 f"LHS={LHS:.6f}, RHS={RHS:.6f}, r={r:.3f}, "
                 f"N_obs={N_obs:.1f}, θ₀={theta0:.4f}, "
@@ -1619,7 +1637,7 @@ class Scheduler(SchedulerInterface):
             self.pd_refill_target = 0
 
         logger.info(
-            f"[THETA+] CP -> EB: phase={self.pd_phase}, "
+            f"[EB+] CP -> EB: phase={self.pd_phase}, "
             f"decoding={num_decoding}, running={len(self.running)}, "
             f"N={self.pd_batch_size_N}, k*={self.pd_switch_threshold_k}"
         )
@@ -1641,7 +1659,7 @@ class Scheduler(SchedulerInterface):
         self.pd_refill_target = 0
 
         logger.info(
-            f"[THETA+] EB -> CP: running={len(self.running)}, "
+            f"[EB+] EB -> CP: running={len(self.running)}, "
             f"waiting={len(self.waiting)}"
         )
 
@@ -3998,7 +4016,7 @@ class Scheduler(SchedulerInterface):
             # Parameter update overhead (cold path)
             "param_update_count": self._param_update_count,
             "last_param_update_us": self._last_param_update_us,
-            # THETA+ auto mode stats
+            # EB+ auto mode stats
             "active_scheduler": (
                 self._active_scheduler
                 if self.scheduler_mode == "auto" else ""),

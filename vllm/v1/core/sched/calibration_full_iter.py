@@ -477,6 +477,23 @@ class HardwareCalibratorFullIter:
         alpha_d = max(0, alpha_d)
         beta_d = max(0, beta_d)
 
+        # Floor alpha_d to a tiny positive epsilon to avoid div-by-zero in the
+        # scheduler's optimal-ratio computation (C = alpha_p / alpha_d). On
+        # some 7B base models the decode latency is so well-modeled by
+        # `beta_d * k` alone that the intercept regresses to 0, which would
+        # crash the scheduler mid-benchmark with EngineDeadError. Use 1% of
+        # beta_d as the floor (a fraction of one decode step, conservatively
+        # small). Mirrors calibration.py.
+        if alpha_d == 0:
+            alpha_d = max(1e-6, beta_d * 0.01)
+            logger.warning(
+                "Calibration: alpha_d regressed to 0; setting to %.3e "
+                "(1%% of beta_d=%.3e) to avoid scheduler div-by-zero. "
+                "If results look off, manually edit the JSON with a "
+                "proxy alpha_d from a similar model on the same GPU.",
+                alpha_d, beta_d,
+            )
+
         params = HardwareParams(
             alpha_p=alpha_p,
             beta_p=beta_p,

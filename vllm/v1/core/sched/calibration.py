@@ -20,7 +20,7 @@ import os
 import platform
 import time
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime
 from pathlib import Path
 
@@ -54,6 +54,10 @@ class HardwareParams:
     device_name: str = ""
     dtype: str = "float16"
     timestamp: str = ""
+    # Set by calibration_full_iter.py to distinguish full-iteration from the
+    # default decomposed measurement; not used by the scheduler but accepted
+    # here so JSONs from either calibrator load without TypeError.
+    measurement_type: str = "decomposed"
 
     # Fitting quality metrics
     prefill_r2: float = 0.0  # R² score for prefill fit
@@ -74,10 +78,11 @@ class HardwareParams:
 
     @classmethod
     def load(cls, filepath: str | Path) -> "HardwareParams":
-        """Load parameters from JSON file."""
+        """Load parameters from JSON file. Tolerates unknown extra keys."""
         with open(filepath) as f:
             data = json.load(f)
-        return cls(**data)
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in data.items() if k in known})
 
     def __str__(self) -> str:
         return (
@@ -491,6 +496,23 @@ class HardwareCalibrator:
         beta_p = max(0, beta_p)
         alpha_d = max(0, alpha_d)
         beta_d = max(0, beta_d)
+
+        # Floor alpha_d to a tiny positive epsilon to avoid div-by-zero in the
+        # scheduler's optimal-ratio computation (C = alpha_p / alpha_d). On
+        # some 7B base models the decode latency is so well-modeled by
+        # `beta_d * k` alone that the intercept regresses to 0, which would
+        # crash the scheduler mid-benchmark with EngineDeadError. Use 1% of
+        # beta_d as the floor (a fraction of one decode step, conservatively
+        # small).
+        if alpha_d == 0:
+            alpha_d = max(1e-6, beta_d * 0.01)
+            logger.warning(
+                "Calibration: alpha_d regressed to 0; setting to %.3e "
+                "(1%% of beta_d=%.3e) to avoid scheduler div-by-zero. "
+                "If results look off, manually edit the JSON with a "
+                "proxy alpha_d from a similar model on the same GPU.",
+                alpha_d, beta_d,
+            )
 
         params = HardwareParams(
             alpha_p=alpha_p,
