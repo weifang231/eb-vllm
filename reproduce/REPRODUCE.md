@@ -65,7 +65,7 @@ python analyze_prefill_linearity_all.py
 python plot_execution_time.py --output execution_time.pdf
 
 cd ../kernel_breakdown
-python benchmark_flash_attn.py --output results_$(hostname).json
+python benchmark_flash_attn_sweep.py --output results_$(hostname).json
 python plot_kernel_breakdown.py --output kernel_breakdown.pdf
 ```
 

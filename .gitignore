@@ -250,6 +250,20 @@ reproduce/**/fig_*.png
 reproduce/**/*_reproduced.pdf
 reproduce/**/*_comparison.pdf
 
+# Local re-runs of paper benchmarks (e.g. *_repro.json/png/pdf produced when
+# a developer regenerates a figure to sanity-check; the committed reference
+# results — results_h200.json etc. — stay in git, the *_repro.* don't).
+reproduce/**/*_repro.json
+reproduce/**/*_repro.png
+reproduce/**/*_repro.pdf
+
+# Personal local venv backups (e.g. .venv.symlink_backup left over from
+# swapping a symlinked venv for a real one).
+.venv.symlink_backup
+.venv.symlink_backup/
+.venv.bak/
+.venv*.bak
+
 # Calibration JSONs: tiny (~500 bytes) and reference values are committed;
 # new ones (generated locally per (model, GPU)) are tracked too if you want
 # them shared. Override per-file with .gitignore if needed.

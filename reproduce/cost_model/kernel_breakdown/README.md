@@ -8,15 +8,16 @@ by decode percentage). Backs `kernel_breakdown*.pdf` in §3 of the paper.
 
 | File | Purpose |
 |---|---|
-| `benchmark_flash_attn.py`, `benchmark_flash_attn_sweep.py` | FlashAttention timing benchmark |
+| `benchmark_flash_attn_sweep.py` | FlashAttention timing benchmark (canonical sweep used for the paper) |
 | `results_h200.json`, `results_a6000.json` | Committed results from the paper |
 | `plot_kernel_breakdown.py` | Render the figure(s) |
 
 ## Run
 
 ```bash
-# To regenerate on your hardware:
-python benchmark_flash_attn.py --output results_$(hostname).json
+# To regenerate on your hardware (canonical sweep — output schema matches
+# what plot_kernel_breakdown.py expects):
+python benchmark_flash_attn_sweep.py --output results_$(hostname).json
 
 # To render from existing JSON(s):
 python plot_kernel_breakdown.py \
