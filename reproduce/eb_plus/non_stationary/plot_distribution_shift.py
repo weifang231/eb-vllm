@@ -28,8 +28,8 @@ import matplotlib.pyplot as plt
 
 
 SCHEDULER_DISPLAY = {
-    "pd_ifr": "THETA (adaptive)",
-    "pd_ratio": r"THETA (fixed $\theta^{*}\!=\!0.8$)",
+    "pd_ifr": "EB(k̂*) (adaptive)",
+    "pd_ratio": r"EB(k̂*) (fixed $\theta^{*}\!=\!0.8$)",
 }
 
 SCHEDULER_COLORS = {

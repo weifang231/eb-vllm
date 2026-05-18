@@ -116,7 +116,7 @@ read_calibration_params() {
 #   v1          vLLM default (mixed-batching MB) — the baseline
 #   eb_khat     EB with CFR midpoint k̂ + dynamic N̂
 #   eb_kratio   EB with fixed θ* (sets VLLM_PD_K_RATIO)
-#   ada         THETA+ auto mode (online MB↔EB switching with Δ(N))
+#   ada         EB+ auto mode (online MB↔EB switching with Δ(N))
 set_scheduler_env() {
     local sched="$1"
     # Capture user-provided overrides BEFORE unset clears them.

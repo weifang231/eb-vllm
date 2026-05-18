@@ -202,7 +202,12 @@ init_experiment_env() {
     local _common_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local venv_path=${1:-"${_common_dir}/../../.venv"}
     ulimit -n 65535 2>/dev/null || true
-    if [ -f "${venv_path}/bin/activate" ]; then
+    # Skip .venv activation if a conda env is already active and has vllm —
+    # otherwise sourcing a stale .venv shadows conda's Python and causes
+    # "ModuleNotFoundError: No module named 'vllm'" mid-run.
+    if [ -n "${CONDA_PREFIX:-}" ] && command -v vllm >/dev/null 2>&1; then
+        : # use the active conda env, skip .venv
+    elif [ -f "${venv_path}/bin/activate" ]; then
         source "${venv_path}/bin/activate"
     elif ! command -v vllm >/dev/null 2>&1; then
         echo "[WARN] No venv found at ${venv_path}/bin/activate and 'vllm' not in PATH." >&2

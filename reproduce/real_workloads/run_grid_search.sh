@@ -113,8 +113,9 @@ else
 fi
 
 # Grid search parameters (SCENARIOS not needed since real datasets have fixed distributions)
-BS_VALUES=(256 512 1024 1536 2048)
-TB_VALUES=(4096 8192 10240 14336 16384 18432)
+# Env-overridable: e.g. BS_VALUES="1024 1536" TB_VALUES="8192 10240" ./run_grid_search.sh ...
+BS_VALUES=(${BS_VALUES:-256 512 1024 1536 2048})
+TB_VALUES=(${TB_VALUES:-4096 8192 10240 14336 16384 18432})
 
 # Output directory (includes model name)
 OUTPUT_DIR="${SCRIPT_DIR}/../outputs/grid_search_${DATASET_NAME}_${MODEL_SHORT}_Con_${MAX_CONCURRENCY}_Prompts_${NUM_PROMPTS}${OUTPUT_DIR_SUFFIX:-}"

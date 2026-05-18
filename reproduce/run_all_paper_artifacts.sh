@@ -305,9 +305,13 @@ phase_E_eb_plus_nonstat() {
     # Find a free GPU (distshift takes 1 GPU, concshift takes another)
     local DIST_GPU=$GPU_OFFSET CONC_GPU=$((MAX_GPUS > 1 ? GPU_OFFSET + 1 : GPU_OFFSET))
 
+    # NOTE: unset PHASES before invoking child scripts — both this wrapper and
+    # run_distribution_shift.sh use the var name `PHASES` for different things
+    # (wrapper: A/B/C/D/E selection; child: "1024:128,512:512,128:1024" phase
+    # spec). Without unset, child crashes parsing "A" or "E" as a phase.
     if ! ls outputs/distribution_shift_Qwen3-8B_*/bench_pd_auto.json 1>/dev/null 2>&1; then
         log "  Running distribution_shift on GPU $DIST_GPU ..."
-        SCHEDULERS="baseline,pd_ifr,pd_auto" \
+        env -u PHASES SCHEDULERS="baseline,pd_ifr,pd_auto" \
             bash run_distribution_shift.sh "$DIST_GPU" \
             > "$LOGDIR/E_distshift.log" 2>&1
         log "  ✓ distshift done"
@@ -317,7 +321,7 @@ phase_E_eb_plus_nonstat() {
 
     if ! ls outputs/concurrency_shift_Qwen3-8B_*/bench_pd_auto_phase3_c500.json 1>/dev/null 2>&1; then
         log "  Running concurrency_shift on GPU $CONC_GPU ..."
-        SCHEDULERS="baseline,pd_ifr,pd_auto" \
+        env -u PHASES SCHEDULERS="baseline,pd_ifr,pd_auto" \
             bash run_concurrency_shift.sh "$CONC_GPU" \
             > "$LOGDIR/E_concshift.log" 2>&1
         log "  ✓ concshift done"
@@ -353,9 +357,8 @@ print_summary() {
     log "  Logs:    $LOGDIR/"
     log "  Outputs scattered under reproduce/*/outputs/"
     log ""
-    log "  Next step: see reproduce/PAPER_VS_KVAWARE_COMPARISON.md"
-    log "  for paper-vs-ours comparison tables. Run the per-subsystem"
-    log "  analyze_*.py / plot_*.py scripts to regenerate the PDF figures."
+    log "  Next step: run the per-subsystem analyze_*.py / plot_*.py"
+    log "  scripts to regenerate the PDF figures (see each subdir's README)."
 }
 
 # ----------------------------------------------------------------------

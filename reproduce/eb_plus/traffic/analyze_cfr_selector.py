@@ -78,7 +78,7 @@ def summarise(wd: Path, scen: str) -> dict | None:
 
     realised_winner = "EB" if tp_eb >= tp_mb else "MB"
     choice, delta_final, eps_hat = selector_decision(runs["ada"]["stats"])
-    # Translate THETA+ vocabulary to paper notation.
+    # Translate EB+ vocabulary to paper notation.
     sel_label = "EB" if choice == "eb" else ("MB" if choice == "cp" else choice)
 
     best_pure = max(tp_mb, tp_eb)

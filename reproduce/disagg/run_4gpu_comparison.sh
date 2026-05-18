@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 4-GPU comparison: CP(DP=4) vs THETA+(DP=4) vs Disagg(1P+3D, 2P+2D, 3P+1D)
+# 4-GPU comparison: CP(DP=4) vs EB+(DP=4) vs Disagg(1P+3D, 2P+2D, 3P+1D)
 #
 # Usage: ./run_4gpu_comparison.sh [GPU1] [GPU2] [GPU3] [GPU4]
 #

@@ -5,7 +5,7 @@
 # For each (workload, GPU) combination, runs three schedulers:
 #   v1      : MB (vLLM default)
 #   eb_khat : EB(k̂) with CFR midpoint
-#   ada     : THETA+ auto mode -- online MB↔EB switching driven by Δ(N)
+#   ada     : EB+ auto mode -- online MB↔EB switching driven by Δ(N)
 #
 # The mode_switch_history (saved in *_stats.json) gives the realised
 # selector choice and the diagnostic Δ(N) trace; the per-config bench

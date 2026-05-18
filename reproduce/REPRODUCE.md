@@ -1,6 +1,6 @@
 # Step-by-step reproduction recipe
 
-Annotated end-to-end recipe for reproducing the THETA paper (ICML 2026).
+Annotated end-to-end recipe for reproducing the EB(k̂*) paper (ICML 2026).
 Times below are wall-clock estimates on 8×RTX PRO 6000 Blackwell (96 GB each).
 
 ## 0. Environment

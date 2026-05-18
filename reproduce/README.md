@@ -1,4 +1,4 @@
-# Reproducing the THETA paper (ICML 2026)
+# Reproducing the EB(k̂*) paper (ICML 2026)
 
 This directory contains the experiment scripts, analysis tools, and plot
 scripts that reproduce every figure and table in the paper. Each
@@ -11,26 +11,44 @@ scripts that reproduce every figure and table in the paper. Each
 git clone https://github.com/weifang231/eb-vllm
 cd eb-vllm
 git checkout release/icml2026
-python -m venv .venv && source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate     # OR: conda create -n eb python=3.12
 pip install torch                                       # match your CUDA
 VLLM_USE_PRECOMPILED=1 pip install -e . --no-build-isolation
                                 # ~30 s; fetches all 8 .so (incl. FA3) from
                                 # the official vLLM wheel — see warning below
-pip install matplotlib numpy pandas scipy
+pip install -r requirements/reproduce.txt              # datasets, aiohttp, quart, matplotlib, pandas, scipy
 
-# 2. One-time per-(model, GPU) cost-model calibration. The default --output
-# auto-detects the GPU and writes to reproduce/calibration/pd_calibration_<model>_<GPU>.json,
-# which is exactly where the runner scripts (resolve_calibration in
-# common/common_cfr.sh) look for it.
-python -m vllm.v1.core.sched.calibration --model Qwen/Qwen3-8B
-# (Sample H200 / RTX PRO 6000 calibrations shipped under reproduce/calibration/.)
+# 2. Download ShareGPT (other datasets auto-download from HF on first use)
+wget -P reproduce/ \
+    https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 
-# 3. Run one paper artifact (example: Table 3 H200, Qwen3-8B ShareGPT)
+# 3. Export prompt datasets for paper §4.3 real-world workloads (~5 min CPU)
+cd reproduce/common
+python export_dataset.py --dataset sharegpt    --model Qwen/Qwen3-8B --num-samples 4000 \
+    --sharegpt-path ../ShareGPT_V3_unfiltered_cleaned_split.json \
+    --output ../outputs/sharegpt_prompts.jsonl
+python export_dataset.py --dataset longbench   --model Qwen/Qwen3-8B --num-samples 4000 \
+    --min-input-len 1000 --max-input-len 4000 \
+    --output ../outputs/longbench_prefill.jsonl
+python export_dataset.py --dataset numina_math --model Qwen/Qwen3-8B --num-samples 4000 \
+    --output ../outputs/numina_math_prompts.jsonl
+cd ../real_workloads/multiturn
+python export_dataset.py --dataset wildchat    --model Qwen/Qwen3-8B \
+    --output ../../outputs/wildchat_multiturn.json     # defaults to paper-faithful 3000 conv / min_turns=6
+
+# 4. One-time per-(model, GPU) cost-model calibration (~15 min per model)
+cd ../../..   # back to eb-vllm/
+python -m vllm.v1.core.sched.calibration --model Qwen/Qwen3-8B \
+    --output reproduce/calibration/pd_calibration_Qwen3-8B_$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1 | sed 's/.*RTX PRO 6000.*/RTXPRO6000/;s/.*H200.*/H200/;s/ /_/g').json
+# Sample H200 + RTX PRO 6000 calibrations are shipped under reproduce/calibration/.
+
+# 5. Run one paper artifact (example: Table 2 Qwen3-8B ShareGPT)
 cd reproduce/real_workloads
-IGNORE_EOS=true CUSTOM_OUTPUT_LEN=500 MODEL=Qwen/Qwen3-8B \
-    bash run_optimal_only.sh ../outputs/sharegpt_prompts.jsonl 1
+VLLM_PD_CALIBRATION_FILE=$PWD/../calibration/pd_calibration_Qwen3-8B_RTXPRO6000.json \
+GPUS=0,1 SCHEDULERS="baseline pd_ifr" MODEL=Qwen/Qwen3-8B \
+    bash run_optimal_only.sh ../outputs/sharegpt_prompts.jsonl 2
 
-# 4. Analyze / plot
+# 6. Analyze / plot
 python analyze_grid_search.py ../outputs/optimal_only_sharegpt_prompts_Qwen3-8B_*
 ```
 
@@ -63,7 +81,6 @@ export VLLM_PD_MODE_SWITCH_DELTA=1e-5
 ```
 
 For end-to-end recipes with expected runtimes, see [`REPRODUCE.md`](REPRODUCE.md).
-For per-figure reproduction status, see [`REPRODUCTION_REPORT.md`](REPRODUCTION_REPORT.md).
 
 ## Paper section → subdirectory
 
@@ -89,17 +106,14 @@ For per-figure reproduction status, see [`REPRODUCTION_REPORT.md`](REPRODUCTION_
   shipped; reviewers regenerate per (model, GPU) as needed).
 - [`docker/`](docker/) — Dockerfile and build script for a reproducible
   environment.
+- [`PD_SCHEDULER_ENV_VARS.md`](PD_SCHEDULER_ENV_VARS.md) — reference for all
+  35 `VLLM_PD_*` env vars (mode selection, calibration, θ/N controllers,
+  EB⁺ switching, diagnostics) with defaults, types, and audience tags.
 
 ## Recommended run order
 
 See [`REPRODUCE.md`](REPRODUCE.md) for an annotated end-to-end recipe with
 expected runtimes on a reference 8×RTX PRO 6000 machine.
-
-## Reproduction status
-
-See [`REPRODUCTION_REPORT.md`](REPRODUCTION_REPORT.md) for per-figure
-reproducibility status (✅ / ⚠️ / ⛔), exact commands, and notes on how the
-implementation maps to the analytical statements in the paper.
 
 ## Notes
 
@@ -111,3 +125,109 @@ implementation maps to the analytical statements in the paper.
   `run_*.sh` writes results under its local `outputs/` subtree.
 - `SKIP_EXISTING=1` (default) lets a re-run resume from where it stopped;
   a cell with an existing `bench_*.json` is skipped.
+
+## Reproduction pitfalls (read this first if your numbers don't match paper)
+
+Discovered while reproducing on RTX PRO 6000 (May 2026). Each item below was a
+real blocker until fixed. **Items marked ✅ patched** have been fixed in this
+branch; ⚠️ items remain in paper/setup level and require reader awareness.
+
+### 1. ✅ Throughput unit standardized to total tokens/s (paper + code consistent)
+Paper has been unified: §4 Metrics explicitly states "Throughput in tokens/s
+(prefill+decode) and requests/s (RPS)" — all `tok/s` cells across Tab 4,
+Tab 5, Disagg, e2e-128k now mean **total throughput** (input + output tokens).
+vLLM's bench JSON `total_token_throughput` field matches paper.
+
+Earlier versions of the paper had output-vs-total inconsistencies between
+columns within the same table (verified via TTFT/TPOT self-consistency
+check: `tput = concurrency / (TTFT + μ_O × TPOT) × tokens_per_req`); these
+are now resolved.
+
+### 2. ✅ Synthetic workloads use ±50% UNIFORM jitter, not CFR/geometric (patched)
+Paper §4.1 spec: "Synthetic workloads fix mean input/output token counts
+(with ±50% uniform jitter)". `run_grid_search_cfr.sh` and
+`run_adaptive_selector_cfr.sh` previously hardcoded
+`--dataset-name geometric_random` — now patched to default to `random` (uniform)
+via env-override `DATASET_NAME=${DATASET_NAME:-random}`. To restore the old CFR
+behavior explicitly:
+```bash
+DATASET_NAME=geometric_random bash run_grid_search_cfr.sh ...
+```
+Using `geometric_random` produces +5-15pp larger EB improvements on synthetic
+than paper because the heavier tail of geometric output lengths favors
+exclusive batching.
+
+### 3. ✅ WildChat uses 3,000 conversations (NOT 500) — defaults patched
+Paper `evaluation.tex` §4.1: "WildChat: 3,000 multi-turn, ~27,900 requests".
+`multiturn/export_dataset.py` previously defaulted to 500 conv / min_turns=8;
+now defaults to `--num-conversations 3000 --min-turns 6` (paper §4.1 setting):
+```bash
+python real_workloads/multiturn/export_dataset.py \
+    --dataset wildchat --model Qwen/Qwen3-8B \
+    --output reproduce/outputs/wildchat_multiturn.json
+```
+With 500 conv, server saturates fast → median TTFT under-reports paper by
+10–25×. RPS comparable (server-bound), TTFT very different.
+
+### 4. ✅ Scalability (Fig 7) uses Mathstral-7B-v0.1 (paper + code consistent)
+Both paper §4.5.2 text and the figure plot script now use
+`mistralai/Mathstral-7B-v0.1` consistently. The multiturn lookup table in
+`real_workloads/multiturn/run_optimal_only.sh` includes Mathstral as one of
+the 4 cross-model scalability entries. **Do not use Mistral-7B-v0.1** (base
+model, no chat template — will fail with HTTP 400 on multi-turn).
+
+### 5. ✅ PHASES env var collides with run_distribution_shift.sh (patched)
+The one-click wrapper `run_all_paper_artifacts.sh` uses `PHASES` env var
+to select phases (A/B/C/D/E). The inner script
+`run_distribution_shift.sh` ALSO uses `PHASES` for its multi-phase dataset
+spec ("1024:128,512:512,128:1024"). Without `unset PHASES`, the dataset
+generator crashes ("not enough values to unpack"). Patched: wrapper now uses
+`env -u PHASES` when invoking distshift/concshift children.
+
+### 6. ✅ Calibration alpha_d can be 0 for some models (patched)
+The calibrator fits decode latency as `T_d = α_d + β_d × k`. On a small
+number of 7B base models we tested (none of them in the paper-reproduction
+set), the regression yields `α_d = 0`. The scheduler then crashes on
+`C = α_p / α_d` (division by zero, seen as `EngineDeadError` mid-benchmark).
+Patched: `vllm/v1/core/sched/calibration.py` now floors `α_d` to
+`max(1e-6, β_d * 0.01)` when regression returns 0, emitting a warning. If
+the floored value looks unreasonable for your model, manually edit the JSON
+with a proxy α_d from a similar model on the same GPU.
+
+### 7. ✅ Missing Python dependencies (now in requirements/reproduce.txt)
+The conda env created from `requirements/build.txt` does not include several
+runtime deps used by reproduce scripts. Install with the new
+`requirements/reproduce.txt`:
+```bash
+pip install -r requirements/reproduce.txt
+```
+Contains: `datasets` (HF datasets exports), `aiohttp` (multi-turn benchmark),
+`quart` (disagg proxy), `matplotlib`/`pandas`/`scipy` (analyze + plot
+scripts).
+
+### 8. ✅ Stale `.venv` in repo root shadows conda env (patched)
+Disaggregation scripts source `init_experiment_env` from `common/common.sh`,
+which auto-sources `<repo>/.venv/bin/activate` if it exists. This previously
+overrode an active conda env's Python path, causing `ModuleNotFoundError:
+No module named 'vllm'`. Patched: `init_experiment_env` now checks
+`$CONDA_PREFIX` and skips `.venv` activation if a conda env with `vllm`
+in PATH is already active.
+
+### 9. ✅ Missing (B, N) entries in `run_optimal_only.sh` lookup table (patched)
+The (B, N) lookup case statement in `real_workloads/run_optimal_only.sh`
+and `real_workloads/multiturn/run_optimal_only.sh` originally only covered
+H200 × Qwen3-8B/30B-A3B + RTXPRO6000 × Qwen3-8B — RTXPRO6000 ×
+Qwen3-30B-A3B + cross-model scalability entries were missing (script
+exited with "no (B, N) entry"). Now patched with 12 RTX PRO 6000 ×
+Qwen3-30B-A3B entries (from paper Appendix `tab:optimal-config-a6000`)
+plus 4 cross-model wildchat entries (Llama-3.1-8B-Instruct,
+Mathstral-7B-v0.1, Qwen2.5-Coder-7B, DeepSeek-R1-Distill-Qwen-7B).
+
+### 10. ✅ `run_grid_search.sh` BS_VALUES/TB_VALUES env override (patched)
+Lines 116-117 of `real_workloads/run_grid_search.sh` previously hardcoded
+the BS/TB arrays. Patched to accept env-override:
+```bash
+BS_VALUES="1024 1536" TB_VALUES="8192 14336" \
+    bash real_workloads/run_grid_search.sh ...
+```
+

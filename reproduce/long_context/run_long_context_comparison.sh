@@ -1,5 +1,5 @@
 #!/bin/bash
-# Single-GPU comparison: CP vs THETA (EB) vs THETA+ for long-context workloads
+# Single-GPU comparison: CP vs EB(k̂*) vs EB+ for long-context workloads
 #
 # Usage: bash reproduce/long_context/run_long_context_comparison.sh [GPU_ID]
 #

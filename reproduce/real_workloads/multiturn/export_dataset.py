@@ -6,12 +6,14 @@ This script exports conversations from WildChat-1M in a format compatible with
 vLLM's multi-turn benchmark (benchmarks/multi_turn/benchmark_serving_multi_turn_threaded.py).
 
 Usage:
-    # Export WildChat conversations with at least 8 turns
+    # Paper §4.1: WildChat 3,000 multi-turn conversations (~27,900 requests),
+    # min 6 turns. Use these exact settings for paper-faithful reproduction —
+    # smaller num-conversations under-reports queueing TTFT by 10-25x.
     python pd_exp/multiturn/export_dataset.py \
         --dataset wildchat \
         --model Qwen/Qwen3-8B \
-        --num-conversations 500 \
-        --min-turns 8 \
+        --num-conversations 3000 \
+        --min-turns 6 \
         --output ./outputs/wildchat_multiturn.json
 
 Then run the multi-turn benchmark:
@@ -43,10 +45,10 @@ def main():
                         help='Dataset to export')
     parser.add_argument('--model', type=str, default='Qwen/Qwen3-8B',
                         help='Model for tokenizer')
-    parser.add_argument('--num-conversations', type=int, default=500,
-                        help='Number of conversations to export')
-    parser.add_argument('--min-turns', type=int, default=8,
-                        help='Minimum turns per conversation')
+    parser.add_argument('--num-conversations', type=int, default=3000,
+                        help='Number of conversations to export (paper §4.1: 3000)')
+    parser.add_argument('--min-turns', type=int, default=6,
+                        help='Minimum turns per conversation (paper §4.1: 6)')
     parser.add_argument('--output', type=str, required=True,
                         help='Output JSON file path')
 
