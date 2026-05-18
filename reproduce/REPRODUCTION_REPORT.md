@@ -1,11 +1,24 @@
-# Reproduction Report — H200 + Qwen3-8B (+ Qwen3-30B-A3B add-on)
+# Reproduction Report — H200 + Qwen3-8B (with B300, Qwen3-30B-A3B, RTX PRO 6000 🚧 add-ons)
 
-One row per paper figure/table. Reproduction was done on a single 8× H200 node
-running this repo at `release/icml2026`, primarily on Qwen3-8B. A second pass on
-Qwen3-30B-A3B (Tables 2-3 only) is documented at the bottom of the report.
+**Primary slice**: 8× H200 + Qwen3-8B on this repo at `release/icml2026` —
+covers paper §4.2–§4.4 and the H200 column of §4.5. **Add-ons**: B300
+(Table 6 high-bandwidth crossover); Qwen3-30B-A3B (MoE scaling on Tables 2-3);
+RTX PRO 6000 🚧 (paper's main bandwidth-constrained hardware — placeholder
+tables, values pending run).
 
-**Legend**: ✅ = reproduced and within tolerance · ⚠️ = reproduced with caveats
-· ⛔ = not run (out of scope or hardware not available)
+**Legend**: ✅ reproduced within tolerance · ⚠️ reproduced with caveats
+· ⛔ not run (hardware unavailable) · 🚧 planned (placeholders below)
+
+## Hardware × model coverage
+
+| Hardware | Mem BW | Status | Models tested |
+|---|---|:---:|---|
+| H200 (8×)     | 4.8 TB/s   | ✅ primary    | Qwen3-8B (all §4.2-§4.4); Qwen3-30B-A3B (MoE); 4× cross-model (Llama-3.1-8B, Mathstral, Qwen2.5-Coder, DeepSeek-R1-Distill) |
+| B300 (1×)     | ~8 TB/s    | ✅ add-on     | Qwen3-8B (Table 6 B300 row; 3 schedulers on WildChat multi-turn) |
+| RTX PRO 6000  | ~1.6 TB/s  | 🚧 planned    | Qwen3-8B (paper's main hardware for §4.3.2 / §4.4 / §4.5.2 — placeholder tables below) |
+| L40S          | ~864 GB/s  | ⛔ unavailable | — (Table 6 L40S row not reproduced) |
+
+A one-glance status row for each paper figure/table is in the **Summary table** at the bottom.
 
 ---
 
@@ -444,7 +457,183 @@ P/D disagg requires manual KV-buffer tuning at high concurrency
 > Paper claim: EB(k̂\*) +41.9% on L40S (bandwidth-constrained); ≈ v1 on B300
 > (highest bandwidth).
 
-Status: ⛔ **NOT REPRODUCED** — L40S and B300 hardware not available.
+Status: ⚠️ **PARTIAL** — B300 reproduced ✅; RTX PRO 6000 planned 🚧;
+L40S unavailable ⛔.
+
+| GPU | Mem BW | Status | Summary |
+|---|---|:---:|---|
+| B300         | ~8 TB/s   | ✅ | EB ≈ v1 — paper's high-bandwidth crossover claim reproduced (details below) |
+| RTX PRO 6000 | ~1.6 TB/s | 🚧 | Placeholder below — paper's primary bandwidth-constrained hardware |
+| L40S         | ~864 GB/s | ⛔ | Hardware unavailable — paper's headline +41.9% EB-vs-v1 **not reproduced** |
+
+### B300 — Qwen3-8B WildChat multi-turn ✅
+
+Reproduces the **B300** column of paper Table 6 (high-bandwidth crossover —
+paper's main claim is *EB ≈ v1 on B300* as memory bandwidth crosses the
+threshold). Single GPU = NVIDIA B300 SXM6 AC (sm_103, 275 GiB HBM, ~8 TB/s),
+Qwen3-8B fp16, WildChat 500-conversation multi-turn export (≥8 turns).
+
+Calibration auto-generated to
+`reproduce/calibration/pd_calibration_Qwen3-8B_B300.json` (α_p=0.00745,
+β_p=1.28e-5, α_d=0.01318, β_d=2.27e-5; prefill R²=0.96, decode R²=0.94).
+Three schedulers run: `baseline` (v1), `pd_ifr` (EB(k̂\*)), and `pd_auto`
+(EB⁺). pd_auto uses H200 β_MB coefficients as B300 proxy (no B300-specific
+mixed-batch fit was performed); see "EB⁺ caveats" below.
+
+#### RPS / TTFT / TPOT vs paper Table 6 (B300 column)
+
+| Scheduler | Ours RPS | Paper RPS | Δ | Ours TTFT (s) | Paper TTFT (s) | Ours TPOT (ms) | Paper TPOT (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v1 (baseline) | 50.47 | 58.69 | -14.0% | 2.08 | 3.13 | 24.00 | 17.09 |
+| EB(k̂\*) (pd_ifr) | 52.34 | 57.41 | -8.8% | 2.87 | 3.72 | 22.12 | 16.63 |
+| EB⁺ (pd_auto) | 51.29 | — | — | **1.73** | — | 29.02 | — |
+
+(Paper Table 6 does not publish per-cell EB⁺ numbers for B300.)
+
+**Key ratios**:
+- **EB(k̂\*) / v1 = 1.037** (paper 0.978) — both within ±5%, both support
+  the qualitative claim *"on a high-bandwidth GPU, EB ≈ v1"*. B300's
+  ~8 TB/s sits well above the EB-favorable regime so EB no longer wins
+  decisively.
+- **EB⁺ / v1 = 1.016** — EB⁺ correctly hugs v1 throughput on B300 (high
+  bandwidth = MB-favorable regime). TTFT is the best of all three (1.73s,
+  −17% vs v1) because EB⁺ uses MB during the warm-up phase before
+  committing to EB.
+
+#### EB⁺ selector behavior (from `pd_auto_stats.json`)
+
+| Metric | Value |
+|---|---|
+| Total scheduler ticks | 2,917 |
+| Time in EB mode | 2,656 ticks (91%) |
+| Time in MB mode | 261 ticks (9%, mostly the prefill-heavy warm-up phase) |
+| Mode-switch count | 2 |
+| Average `decode_tokens / total_tokens` | 0.948 |
+
+EB⁺ correctly identifies the multi-turn dialogue as heavily decode-bound
+(95% decode-token share) and commits to EB after a brief MB warm-up — only
+2 mode switches across the entire 2048-client run. This is the
+EB-favored regime; the selector did the right thing.
+
+#### Verdict (B300)
+
+✅ **Reproduced** the paper's main B300 claim: EB(k̂\*) ≈ v1 within ±5% RPS
+(EB +3.7% in ours vs paper's -2.2%; both consistent with "no advantage" at
+high bandwidth). Absolute throughput 9-14% below paper across all
+schedulers — same uniform drift seen throughout the H200 reproduction
+(implementation drift from newer vLLM nightly), so relative claims hold.
+
+#### Caveats (B300)
+
+- Paper didn't publish B300 (B, N) optima, so we mirrored H200's
+  Qwen3-8B optima: `baseline B=4096 N=2048`, `pd_ifr B=16384 N=1024`,
+  `pd_auto B=16384 N=1024` (same as pd_ifr — EB⁺ falls back to EB-like
+  config since EB+ collapses to EB when EB wins). B300 has higher mem
+  and bandwidth than H200, so H200's choices are at worst a conservative
+  lower bound. A B300-specific grid search would likely close some of
+  the absolute-value gap to paper.
+- 500-conversation dataset (`--num-conversations 500 --min-turns 8`)
+  exhausts before all 2048 clients get useful work — many clients
+  finish with 0 turns processed. Probably contributes to lower absolute
+  RPS but does not affect the v1-vs-EB-vs-EB⁺ comparison since all three
+  runs see identical conversation supply.
+
+#### EB⁺ caveats (pd_auto specifically)
+
+- **β_MB coefficients used H200 values as B300 proxy** (`a=2.494e-05,
+  b=5.193e-05, c=1.478e-05`, `δ_switch=1e-5`). These were not refit from
+  B300 v1 grid data. Despite the proxy, the selector made plausible
+  decisions (91% EB on a 95%-decode workload). For paper-grade B300
+  EB⁺ numbers one should refit β_MB from a B300 v1 synthetic grid
+  (paper-cited recipe is `reproduce/eb_plus/` README §"β_MB calibration").
+- EB⁺ RPS (51.29) is between v1 (50.47) and EB(k̂\*) (52.34). In theory
+  EB⁺ should be ≥ max(v1, EB(k̂\*)); the small (~2%) gap to pd_ifr is
+  consistent with the auto-check / mode-switch overhead plus the β_MB
+  proxy mismatch. Not a regression in selector logic — `mode_switch_count=2`
+  confirms EB⁺ committed to EB early and stayed there.
+
+#### Files (B300)
+
+| File | Purpose |
+|---|---|
+| `calibration/pd_calibration_Qwen3-8B_B300.json` | Cost-model params used by EB(k̂\*) and EB⁺ |
+| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/tb4096/bs2048/bench_baseline.json` | v1 bench result |
+| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/tb16384/bs1024/bench_pd_ifr.json` | EB(k̂\*) bench result |
+| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/tb16384/bs1024/bench_pd_auto.json` | EB⁺ bench result |
+| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/tb16384/bs1024/pd_auto_stats.json` | EB⁺ per-tick selector trace (2,917 ticks) |
+
+#### B300 build gotchas (worth documenting)
+
+Pre-compiled wheels do not work cleanly:
+
+1. **No matching nightly wheel for fork base.** `wheels.vllm.ai` only keeps
+   recent nightlies; the fork base commit `5d64fd8db` (2025-12-11) is gone.
+   The current nightly (`966903eb...`, cu130 variant) has API drift the
+   fork doesn't know about (`cutlass_scaled_mm_supports_fp8`,
+   `compute_encoder_budget` renamed). Source-building is the clean path.
+2. **`sm_103a` cubin is not emitted** even with
+   `TORCH_CUDA_ARCH_LIST="10.0a;10.3a"` — only `sm_100a` ends up in the
+   .so. Confirmed Blackwell forward-compat works: sm_100a kernels run on
+   sm_103 device (empirically verified by full WildChat run).
+3. **flashinfer 0.6.11 added `o_data_type` to `BatchDecodeWithPagedKVCacheWrapper.plan()`.**
+   The fork's `fast_plan_decode` (in `vllm/v1/attention/backends/flashinfer.py`)
+   uses positional args, so on newer flashinfer the call shifts and ends up
+   with `non_blocking=None`, which torch 2.11 then rejects. Patch: pass
+   args by keyword (or downgrade flashinfer to a pre-`o_data_type` version).
+4. **`run_optimal_only.sh` lacks a B300 case.** Add a `B300:Qwen3-8B:*` block
+   mirroring H200 (in `reproduce/real_workloads/run_optimal_only.sh` and
+   `reproduce/real_workloads/multiturn/run_optimal_only.sh`).
+
+Pinned working set on B300 with CUDA 13.2 system toolkit:
+
+```
+torch==2.11.0+cu130          torchvision==0.26.0+cu130   torchaudio==2.11.0+cu130
+nvidia-nccl-cu13>=2.29       numpy<2.3                   triton==3.6.0
+flashinfer-python==0.6.11.post3   flashinfer-cubin==0.6.11.post3
+```
+
+Build invocation (~20 min, 403 ninja targets):
+
+```bash
+TORCH_CUDA_ARCH_LIST="10.0a;10.3a" MAX_JOBS=128 \
+  uv pip install -e . --no-build-isolation
+```
+
+(Do **not** set `VLLM_USE_PRECOMPILED=1` on B300 with the current fork —
+the nightly wheel's `_C.abi3.so` does not match fork Python.)
+
+### RTX PRO 6000 — Qwen3-8B WildChat multi-turn 🚧 (placeholder)
+
+Same scheduler comparison as the B300 subsection above, on RTX PRO 6000
+(~1.6 TB/s mem BW — bandwidth-constrained regime where EB(k̂\*) is expected
+to win decisively). Paper Table 6 does **not** include a RTX PRO 6000 row
+but this hardware is paper's primary subject for §4.3.2 / §4.4 / §4.5.2.
+Run pending — values below to be filled.
+
+#### RPS / TTFT / TPOT (TODO)
+
+| Scheduler | Ours RPS | Paper RPS | Δ | Ours TTFT (s) | Paper TTFT (s) | Ours TPOT (ms) | Paper TPOT (ms) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| v1 (baseline)    | TODO | — | — | TODO | — | TODO | — |
+| EB(k̂\*) (pd_ifr) | TODO | — | — | TODO | — | TODO | — |
+| EB⁺ (pd_auto)    | TODO | — | — | TODO | — | TODO | — |
+
+#### Setup (planned)
+
+- Hardware: NVIDIA RTX PRO 6000 (96 GiB GDDR7, ~1.6 TB/s mem BW)
+- Model: Qwen3-8B fp16
+- Workload: WildChat 500-conversation multi-turn export (matches B300 setup)
+- Calibration: `reproduce/calibration/pd_calibration_Qwen3-8B_RTX_PRO_6000.json` (TODO — auto-generate via `python -m vllm.v1.core.sched.calibration`)
+- Schedulers: baseline (v1) / pd_ifr (EB(k̂\*)) / pd_auto (EB⁺)
+- Expected: paper's bandwidth-driven model predicts **EB(k̂\*) > v1** in this regime; EB⁺ should track the winner
+
+(Paper artifacts that ran on RTX PRO 6000 beyond Table 6 — Tables 2-3, Table 4, Table 5, Figure 7 — have separate placeholder tables in the "RTX PRO 6000 add-on" section further below.)
+
+### L40S ⛔
+
+L40S hardware is not available on our test environment. Paper Table 6's
+L40S row (v0: 4.14 RPS, v1: 10.36 RPS, EB(k̂\*): 14.70 RPS — paper's headline
+**+41.9% EB-vs-v1**) remains **not reproduced**.
 
 ---
 
@@ -689,6 +878,137 @@ GPUS=0 SCHEDULERS=pd_ifr MODEL=Qwen/Qwen3-30B-A3B \
 
 ---
 
+## RTX PRO 6000 add-on — paper's main bandwidth-constrained hardware 🚧 (planned)
+
+Paper uses RTX PRO 6000 (~1.6 TB/s mem BW) as the **primary** hardware for the
+EB-favorable regime: paper §4.3.2 Tables 2-3, §4.4 Table 4 (EB⁺ traffic-level),
+§4.4 Table 5 (EB⁺ non-stationary), and §4.5.2 Figure 7 (cross-model). Our
+H200 reproduction covers these artifacts on H200 — where paper notes the
+EB-vs-v1 gap narrows due to higher bandwidth. This add-on reproduces them
+directly on RTX PRO 6000. **Run pending — placeholder tables below; values
+to be filled.**
+
+(See also the RTX PRO 6000 WildChat row in [§4.5.1 Table 6](#table-6--cross-gpu-scalability-paper-451)
+above, which is the cross-GPU comparison for Table 6 column completeness.)
+
+Status: 🚧 **PLANNED** — calibration + 4 paper artifacts pending run.
+
+### Tables 2-3 — Real-world workloads (paper §4.3.2) 🚧
+
+Paper headline on RTX PRO 6000: EB(k̂\*) wins on all 4 workloads, +10-15% RPS.
+
+| Workload | Paper v1 | Ours v1 | Paper EB(k̂\*) | Ours EB(k̂\*) | Paper Δ | Ours Δ | Direction |
+|---|---:|---:|---:|---:|---:|---:|---|
+| ShareGPT   | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| LongBench  | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| WildChat   | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| NuminaMath | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+
+### Figures 5-6 — TTFT / TPOT on real workloads (paper §4.3.3) 🚧
+
+Paper headline: EB(k̂\*) achieves **65% TPOT reduction** on ShareGPT.
+
+| Workload | Sched | RPS | TTFT_mean (s) | TPOT_mean (ms) |
+|---|---|---:|---:|---:|
+| ShareGPT   | v1 (baseline)    | TODO | TODO | TODO |
+| ShareGPT   | EB(k̂\*) (pd_ifr) | TODO | TODO | TODO |
+| LongBench  | v1               | TODO | TODO | TODO |
+| LongBench  | EB(k̂\*)          | TODO | TODO | TODO |
+| WildChat   | v1               | TODO | TODO | TODO |
+| WildChat   | EB(k̂\*)          | TODO | TODO | TODO |
+| NuminaMath | v1               | TODO | TODO | TODO |
+| NuminaMath | EB(k̂\*)          | TODO | TODO | TODO |
+
+### Table 4 — EB⁺ traffic-level (paper §4.4, μ_O=256) 🚧
+
+Paper headline on RTX PRO 6000: EB⁺ selects MB at c=32 (recovers v1's TTFT)
+and EB at c=2048.
+
+| c | Paper v1 | Ours v1 | Paper EB | Ours EB | Paper EB⁺ | Ours EB⁺ | Paper EB⁺ choice | Ours EB⁺ choice |
+|---|---:|---:|---:|---:|---:|---:|:---:|:---:|
+| 32   | TODO | TODO | TODO | TODO | TODO | TODO | MB | TODO |
+| 512  | TODO | TODO | TODO | TODO | TODO | TODO | TODO | TODO |
+| 2048 | TODO | TODO | TODO | TODO | TODO | TODO | EB | TODO |
+
+### Table 5 — EB⁺ non-stationary (paper §4.4) 🚧
+
+Paper headline on RTX PRO 6000:
+
+| Workload | Sched | Paper tput (tok/s) | Ours tput | Δ vs paper |
+|---|---|---:|---:|---:|
+| Distribution shift | v1       | 3,456 | TODO | TODO |
+| Distribution shift | EB(k̂\*)  | 4,467 | TODO | TODO |
+| Distribution shift | EB⁺      | 4,752 | TODO | TODO |
+| Concurrency shift  | v1       | 3,019 | TODO | TODO |
+| Concurrency shift  | EB(k̂\*)  | 3,306 | TODO | TODO |
+| Concurrency shift  | EB⁺      | 3,451 | TODO | TODO |
+
+### Figure 7 — Cross-model scalability (paper §4.5.2) 🚧
+
+Paper headline on RTX PRO 6000: EB(k̂\*) wins on all 4 models; up to
+**47% TPOT reduction** on Llama-3.1-8B.
+
+| Model | v1 RPS | EB(k̂\*) RPS | RPS Δ | v1 TPOT (ms) | EB(k̂\*) TPOT (ms) | TPOT Δ |
+|---|---:|---:|---:|---:|---:|---:|
+| Llama-3.1-8B-Instruct       | TODO | TODO | TODO | TODO | TODO | TODO |
+| Mathstral-7B-v0.1           | TODO | TODO | TODO | TODO | TODO | TODO |
+| Qwen2.5-Coder-7B            | TODO | TODO | TODO | TODO | TODO | TODO |
+| DeepSeek-R1-Distill-Qwen-7B | TODO | TODO | TODO | TODO | TODO | TODO |
+
+### Setup (planned)
+
+- Hardware: NVIDIA RTX PRO 6000 (96 GiB GDDR7, ~1.6 TB/s mem BW)
+- Model: Qwen3-8B fp16 (+ 4 cross-model variants for Figure 7)
+- Calibration: `reproduce/calibration/pd_calibration_Qwen3-8B_RTX_PRO_6000.json` (TODO — auto-generate per H200/B300 workflow)
+- (B, N) optima: use paper-reported RTX PRO 6000 values (paper Appendix `tab:optimal-config-rtx`)
+- Schedulers: baseline (v1) / pd_ratio (v0) / pd_ifr (EB(k̂\*)) / pd_auto (EB⁺)
+
+### Files (planned)
+
+```
+reproduce/calibration/pd_calibration_Qwen3-8B_RTX_PRO_6000.json
+reproduce/outputs/optimal_only_{sharegpt_prompts,longbench_prefill,numina_math_prompts}_Qwen3-8B_RTX_PRO_6000_*/
+reproduce/real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_RTX_PRO_6000_*/
+reproduce/eb_plus/traffic/outputs/adaptive_selector_table4_c{32,512,2048}_RTX_PRO_6000/
+reproduce/eb_plus/outputs/{distribution_shift,concurrency_shift}_Qwen3-8B_RTX_PRO_6000_*/
+reproduce/outputs/optimal_only_sharegpt_prompts_{Llama-3.1-8B-Instruct,Mathstral-7B-v0.1,Qwen2.5-Coder-7B,DeepSeek-R1-Distill-Qwen-7B}_RTX_PRO_6000_*/
+```
+
+### Commands (planned, mirror H200 workflow)
+
+```bash
+# 1) Calibration
+python -m vllm.v1.core.sched.calibration \
+    --model Qwen/Qwen3-8B \
+    --output reproduce/calibration/pd_calibration_Qwen3-8B_RTX_PRO_6000.json
+
+# 2) Tables 2-3 (4 workloads × {baseline, pd_ifr})
+GPUS=0,1 SCHEDULERS="baseline pd_ifr" MODEL=Qwen/Qwen3-8B \
+  bash reproduce/real_workloads/run_optimal_only.sh \
+      reproduce/outputs/sharegpt_prompts.jsonl 2
+# ... repeat for longbench_prefill, numina_math_prompts, multiturn/wildchat
+
+# 3) Table 4 (3 concurrencies)
+for c in 32 512 2048; do
+    MAX_CONCURRENCY=$c OUTPUT_LEN=256 MODEL=Qwen/Qwen3-8B \
+        bash reproduce/eb_plus/traffic/run_adaptive_selector_cfr.sh 8
+done
+
+# 4) Table 5 (distribution shift + concurrency shift)
+bash reproduce/eb_plus/non_stationary/run_distribution_shift.sh 0
+bash reproduce/eb_plus/non_stationary/run_concurrency_shift.sh 1
+
+# 5) Figure 7 (4 cross-model variants)
+for M in meta-llama/Llama-3.1-8B-Instruct mistralai/Mathstral-7B-v0.1 \
+         Qwen/Qwen2.5-Coder-7B deepseek-ai/DeepSeek-R1-Distill-Qwen-7B; do
+    GPUS=0,1 SCHEDULERS="baseline pd_ratio pd_ifr" MODEL=$M \
+        bash reproduce/real_workloads/run_optimal_only.sh \
+            reproduce/outputs/sharegpt_prompts.jsonl 2
+done
+```
+
+---
+
 # Output-directory map
 
 For each paper figure / table, the bench output directory the data was
@@ -696,144 +1016,6 @@ extracted from. All paths are relative to `reproduce/`. Note: these
 directories are all `.gitignore`d (see `reproduce/outputs/` rule in the root
 `.gitignore`), so a fresh `git clone` will not contain them — they are
 re-generated when the corresponding `run_*.sh` is executed.
-
-## §4.5.1 cross-GPU add-on — B300, Qwen3-8B WildChat multi-turn
-
-Reproduces the **B300** column of paper Table 6 (high-bandwidth crossover —
-paper's main claim is *EB ≈ v1 on B300* as memory bandwidth crosses the
-threshold). Single GPU = NVIDIA B300 SXM6 AC (sm_103, 275 GiB HBM, ~8 TB/s),
-Qwen3-8B fp16, WildChat 500-conversation multi-turn export (≥8 turns).
-
-Calibration auto-generated to
-`reproduce/calibration/pd_calibration_Qwen3-8B_B300.json` (α_p=0.00745,
-β_p=1.28e-5, α_d=0.01318, β_d=2.27e-5; prefill R²=0.96, decode R²=0.94).
-Three schedulers run: `baseline` (v1), `pd_ifr` (EB(k̂\*)), and `pd_auto`
-(EB⁺). pd_auto uses H200 β_MB coefficients as B300 proxy (no B300-specific
-mixed-batch fit was performed); see "EB⁺ caveats" below.
-
-### RPS / TTFT / TPOT vs paper Table 6 (B300 column)
-
-| Scheduler | Ours RPS | Paper RPS | Δ | Ours TTFT (s) | Paper TTFT (s) | Ours TPOT (ms) | Paper TPOT (ms) |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| v1 (baseline) | 50.47 | 58.69 | -14.0% | 2.08 | 3.13 | 24.00 | 17.09 |
-| EB(k̂\*) (pd_ifr) | 52.34 | 57.41 | -8.8% | 2.87 | 3.72 | 22.12 | 16.63 |
-| EB⁺ (pd_auto) | 51.29 | — | — | **1.73** | — | 29.02 | — |
-
-(Paper Table 6 does not publish per-cell EB⁺ numbers for B300.)
-
-**Key ratios**:
-- **EB(k̂\*) / v1 = 1.037** (paper 0.978) — both within ±5%, both support
-  the qualitative claim *"on a high-bandwidth GPU, EB ≈ v1"*. B300's
-  ~8 TB/s sits well above the EB-favorable regime so EB no longer wins
-  decisively.
-- **EB⁺ / v1 = 1.016** — EB⁺ correctly hugs v1 throughput on B300 (high
-  bandwidth = MB-favorable regime). TTFT is the best of all three (1.73s,
-  −17% vs v1) because EB⁺ uses MB during the warm-up phase before
-  committing to EB.
-
-### EB⁺ selector behavior (from `pd_auto_stats.json`)
-
-| Metric | Value |
-|---|---|
-| Total scheduler ticks | 2,917 |
-| Time in EB mode | 2,656 ticks (91%) |
-| Time in MB mode | 261 ticks (9%, mostly the prefill-heavy warm-up phase) |
-| Mode-switch count | 2 |
-| Average `decode_tokens / total_tokens` | 0.948 |
-
-EB⁺ correctly identifies the multi-turn dialogue as heavily decode-bound
-(95% decode-token share) and commits to EB after a brief MB warm-up — only
-2 mode switches across the entire 2048-client run. This is the
-EB-favored regime; the selector did the right thing.
-
-### Verdict
-
-✅ **Reproduced** the paper's main B300 claim: EB(k̂\*) ≈ v1 within ±5% RPS
-(EB +3.7% in ours vs paper's -2.2%; both consistent with "no advantage" at
-high bandwidth). Absolute throughput 9-14% below paper across both
-schedulers — same uniform drift seen throughout the H200 reproduction
-(implementation drift from newer vLLM nightly), so relative claims hold.
-
-### Caveats
-
-- Paper didn't publish B300 (B, N) optima, so we mirrored H200's
-  Qwen3-8B optima: `baseline B=4096 N=2048`, `pd_ifr B=16384 N=1024`,
-  `pd_auto B=16384 N=1024` (same as pd_ifr — EB⁺ falls back to EB-like
-  config since EB+ collapses to EB when EB wins). B300 has higher mem
-  and bandwidth than H200, so H200's choices are at worst a conservative
-  lower bound. A B300-specific grid search would likely close some of
-  the absolute-value gap to paper.
-- 500-conversation dataset (`--num-conversations 500 --min-turns 8`)
-  exhausts before all 2048 clients get useful work — many clients
-  finish with 0 turns processed. Probably contributes to lower absolute
-  RPS but does not affect the v1-vs-EB-vs-EB⁺ comparison since all three
-  runs see identical conversation supply.
-
-### EB⁺ caveats (pd_auto specifically)
-
-- **β_MB coefficients used H200 values as B300 proxy** (`a=2.494e-05,
-  b=5.193e-05, c=1.478e-05`, `δ_switch=1e-5`). These were not refit from
-  B300 v1 grid data. Despite the proxy, the selector made plausible
-  decisions (91% EB on a 95%-decode workload). For paper-grade B300
-  EB⁺ numbers one should refit β_MB from a B300 v1 synthetic grid
-  (paper-cited recipe is `reproduce/eb_plus/` README §"β_MB calibration").
-- EB⁺ RPS (51.29) is between v1 (50.47) and EB(k̂\*) (52.34). In theory
-  EB⁺ should be ≥ max(v1, EB(k̂\*)); the small (~2%) gap to pd_ifr is
-  consistent with the auto-check / mode-switch overhead plus the β_MB
-  proxy mismatch. Not a regression in selector logic — `mode_switch_count=2`
-  confirms EB⁺ committed to EB early and stayed there.
-
-### Files
-
-| File | Purpose |
-|---|---|
-| `calibration/pd_calibration_Qwen3-8B_B300.json` | Cost-model params used by EB(k̂\*) and EB⁺ |
-| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/tb4096/bs2048/bench_baseline.json` | v1 bench result |
-| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/tb16384/bs1024/bench_pd_ifr.json` | EB(k̂\*) bench result |
-| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/tb16384/bs1024/bench_pd_auto.json` | EB⁺ bench result |
-| `real_workloads/outputs/multiturn_wildchat_multiturn_Qwen3-8B_Clients_2048_MaxTurns_12/tb16384/bs1024/pd_auto_stats.json` | EB⁺ per-tick selector trace (2,917 ticks) |
-
-### B300 build gotchas (worth documenting)
-
-Pre-compiled wheels do not work cleanly:
-
-1. **No matching nightly wheel for fork base.** `wheels.vllm.ai` only keeps
-   recent nightlies; the fork base commit `5d64fd8db` (2025-12-11) is gone.
-   The current nightly (`966903eb...`, cu130 variant) has API drift the
-   fork doesn't know about (`cutlass_scaled_mm_supports_fp8`,
-   `compute_encoder_budget` renamed). Source-building is the clean path.
-2. **`sm_103a` cubin is not emitted** even with
-   `TORCH_CUDA_ARCH_LIST="10.0a;10.3a"` — only `sm_100a` ends up in the
-   .so. Confirmed Blackwell forward-compat works: sm_100a kernels run on
-   sm_103 device (empirically verified by full WildChat run).
-3. **flashinfer 0.6.11 added `o_data_type` to `BatchDecodeWithPagedKVCacheWrapper.plan()`.**
-   The fork's `fast_plan_decode` (in `vllm/v1/attention/backends/flashinfer.py`)
-   uses positional args, so on newer flashinfer the call shifts and ends up
-   with `non_blocking=None`, which torch 2.11 then rejects. Patch: pass
-   args by keyword (or downgrade flashinfer to a pre-`o_data_type` version).
-4. **`run_optimal_only.sh` lacks a B300 case.** Add a `B300:Qwen3-8B:*` block
-   mirroring H200 (in `reproduce/real_workloads/run_optimal_only.sh` and
-   `reproduce/real_workloads/multiturn/run_optimal_only.sh`).
-
-Pinned working set on B300 with CUDA 13.2 system toolkit:
-
-```
-torch==2.11.0+cu130          torchvision==0.26.0+cu130   torchaudio==2.11.0+cu130
-nvidia-nccl-cu13>=2.29       numpy<2.3                   triton==3.6.0
-flashinfer-python==0.6.11.post3   flashinfer-cubin==0.6.11.post3
-```
-
-Build invocation (~20 min, 403 ninja targets):
-
-```bash
-TORCH_CUDA_ARCH_LIST="10.0a;10.3a" MAX_JOBS=128 \
-  uv pip install -e . --no-build-isolation
-```
-
-(Do **not** set `VLLM_USE_PRECOMPILED=1` on B300 with the current fork —
-the nightly wheel's `_C.abi3.so` does not match fork Python.)
-
----
 
 ## Canonical outputs (paper figures and tables)
 
@@ -875,9 +1057,10 @@ the nightly wheel's `_C.abi3.so` does not match fork Python.)
 | Table 5 (EB⁺ non-stationary) | §4.4 | ✅ | EB⁺ 20,474 vs paper 20,776 (-1.5%); v1 20,632 vs paper 18,307 (+13%); EB(k̂*) 21,624 vs paper 17,394 (+24%, with θ_min=0.7 from run_distribution_shift.sh). All 3 schedulers reproduce paper |
 | Long-context fig | §4.4 | ✅ | EB TPOT 37% lower than v1; EB⁺ matches v1 |
 | Disaggregation | §4.4 + App | ✅ | EB⁺ > baseline > vLLM native P/D at c=64; native P/D OOMs at c=2048 (paper claim ✓) |
-| Table 6 (cross-GPU) | §4.5.1 | ⚠️ | B300 WildChat done (3 schedulers: v1 / EB(k̂\*) / EB⁺): EB/v1 = 1.037 (paper 0.978), EB⁺/v1 = 1.016 — both within ±5% of paper's "EB ≈ v1 on high-bandwidth GPU" claim. EB⁺ selector chose EB for 91% of ticks on a 95%-decode workload (`mode_switch_count=2`). Absolute -9 to -14% (uniform drift). L40S still unavailable. See §4.5.1 add-on section above. |
-| Figure 7 (cross-model) | §4.5.2 | ⚠️ | 4 models on **H200** (paper used RTX PRO 6000): EB > v1 on Llama (+4.6%), Mathstral (+7.5%), DeepSeek (+2.6%); EB < v1 on Qwen2.5-Coder (−24.9%). TTFT reduced 17-24% on 3/4. TPOT *increased* on all 4 (paper showed TPOT decrease on RTX PRO 6000) |
+| Table 6 (cross-GPU) | §4.5.1 | ⚠️ | **B300** ✅ — 3 schedulers (v1/EB/EB⁺): EB/v1=1.037 (paper 0.978), EB⁺/v1=1.016 — all within ±5% of paper's "EB ≈ v1 on high-bandwidth GPU" claim. EB⁺ selector chose EB for 91% of ticks on a 95%-decode workload (`mode_switch_count=2`). Absolute -9 to -14% (uniform drift). **RTX PRO 6000** 🚧 placeholder added. **L40S** ⛔ unavailable. |
+| Figure 7 (cross-model) | §4.5.2 | ⚠️ | 4 models on **H200** (paper used RTX PRO 6000): EB > v1 on Llama (+4.6%), Mathstral (+7.5%), DeepSeek (+2.6%); EB < v1 on Qwen2.5-Coder (−24.9%). TTFT reduced 17-24% on 3/4. TPOT *increased* on all 4 (paper showed TPOT decrease on RTX PRO 6000). RTX PRO 6000 rerun planned 🚧 |
 | Tables 2-3 (Qwen3-30B-A3B add-on) | §4.3.2 / §4.5 | ✅ | Reproduced with paper-§4.1 protocol (`--ignore-eos` + per-workload output_len). 4/4 directions match paper; 7/8 cells within ±5% of paper. ShareGPT has −30% absolute gap (grid search confirms not (B, N) related, structural cross-system difference). NumimaMath pd_ifr needs `θ_floor=0.7` to avoid thrashing at r → 1; WildChat pd_ifr uses `θ=0.85`. Paper's α-driven prediction (EB drops vs v1 as model scales) reproduces |
+| RTX PRO 6000 add-on (Tables 2-3, Figs 5-6, Table 4, Table 5, Figure 7) | §4.3-§4.5 | 🚧 | Placeholder tables — run pending. Paper's primary bandwidth-constrained hardware (where headline EB-vs-v1 gains live). Calibration + 5 paper artifacts to be filled |
 
 # Overall conclusion
 
