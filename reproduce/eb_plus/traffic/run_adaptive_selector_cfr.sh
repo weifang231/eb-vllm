@@ -18,7 +18,9 @@
 #   ./run_adaptive_selector_cfr.sh [MAX_GPUS]
 #
 # Notes on the diagnostic Δ(N):
-#   The exact Eq. eq:diagnostic uses kernel-cost terms (β_MB^e, α_MB)
+#   The diagnostic (equivalent to Eq. eq:comparison_condition / Prop. 4 in
+#   the camera-ready paper, rearranged as MB-minus-EB) uses kernel-cost
+#   terms (β_MB^e, α_MB)
 #   from a one-time kernel sweep.  If you have measured them, export
 #     VLLM_PD_BETA_MB_E=<f(\bar r)>
 #     VLLM_PD_ALPHA_MB=<α_MB>
