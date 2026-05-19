@@ -41,7 +41,7 @@ new knobs.
 
 | Var | Default | Type | Audience | Read site | Notes |
 |---|---|---|---|---|---|
-| `VLLM_PD_K_MODE` | `direct` | `direct \| ratio \| ifr \| cfr` | paper | `scheduler.py:241` | How θ\* is chosen. `direct`=fixed k\*; `ratio`=fixed θ\*; `ifr`=online IFR estimator (paper §4.3); `cfr`=online CFR estimator (η ≡ 0, used by EB⁺ Quick Start). |
+| `VLLM_PD_K_MODE` | `direct` | `direct \| ratio \| ifr \| cfr` | paper | `scheduler.py:241` | How θ\* is chosen. `direct`=fixed k\*; `ratio`=fixed θ\* (used for fixed-k EB ablations); `ifr`=online IFR estimator — **this is the paper's EB(k̂\*) and the recommended EB⁺ inner kernel** (paper §4.3); `cfr`=online CFR estimator with closed-form midpoint construction (η ≡ 0; **journal-version material**, not described in the camera-ready paper). |
 | `VLLM_PD_K_STAR` | `""` | int | paper | `scheduler.py:243` | In `direct` mode: pin batch size to this k\*. |
 | `VLLM_PD_K_RATIO` | `""` | float ∈ (0,1) | paper | `scheduler.py:247` | In `ratio` mode: pin θ\* to this value. |
 | `VLLM_PD_IFR_WINDOW_SIZE` | `500` | int | advanced | `scheduler.py:306` | IFR sliding-window size (requests). Smaller → more reactive, noisier. |

@@ -1,8 +1,14 @@
 # §4.3.2-3 — Real-world workloads and latency
 
-`(B, N)` grid search of v0 / v1 / EB(k̂\*) on ShareGPT, LongBench, WildChat,
+`(B, N)` grid search of v1 / EB(k̂\*) on ShareGPT, LongBench, WildChat,
 NuminaMath across Qwen3-8B / Qwen3-30B-A3B × RTX PRO 6000 / H200. Produces
 the §4.3.2 throughput Tables 2-3 and §4.3.3 latency Figs. `ttft.pdf`, `tpot.pdf`.
+
+> The paper's `v0` column comes from a separate vLLM v0 codebase, not from
+> this fork. This directory's `pd_ratio` scheduler is a fixed-θ EB ablation
+> on the vLLM v1 codebase — superficially similar to v0 but **not** a
+> like-for-like reproduction. Paper Tables 2-3 v0 numbers should be sourced
+> from the v0 repo, not from pd_ratio runs here.
 
 ## Files
 

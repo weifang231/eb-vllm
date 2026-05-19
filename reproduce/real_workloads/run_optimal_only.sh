@@ -8,11 +8,15 @@
 # Qwen3-8B) of the camera-ready paper.  The mapping between paper schedulers
 # and the script's --VLLM_PD_K_MODE choices is:
 #     baseline  <-  v1   (vLLM default; VLLM_USE_PD_SCHEDULER=0)
-#     pd_ifr    <-  EB(k_hat^*)  (adaptive theta*, IFR mode)
-#     pd_ratio                   (CFR with fixed theta*=K_RATIO; not in paper)
+#     pd_ifr    <-  EB(k_hat^*)  (adaptive theta*, k_mode=ifr)
+#     pd_ratio  <-  fixed-k EB ablation only (k_mode=ratio, fixed theta=K_RATIO);
+#                   NOT a reproduction of the paper's v0 scheduler.  Paper v0
+#                   is implemented on the older vLLM v0 codebase in a separate
+#                   repo; pd_ratio numbers from this script should not be
+#                   reported as "v0".
 #
-# The paper does not report a pd_ratio-specific optimum, so pd_ratio reuses
-# pd_ifr's (B, N) since both are EB variants and (B, N) is robust within EB.
+# pd_ratio reuses pd_ifr's (B, N) since both are EB variants and (B, N) is
+# robust within EB.
 #
 # Usage:
 #   ./run_optimal_only.sh <DATASET_PATH> [MAX_GPUS]
@@ -87,8 +91,12 @@ fi
 #
 # Scheduler -> paper-vocab mapping (see evaluation.tex §4.3.1):
 #   baseline = v1 (vLLM default mixed batching)
-#   pd_ratio = v0 (exclusive batching, EB(k=1) under heavy traffic)
 #   pd_ifr   = EB(k_hat^*) (adaptive threshold from this paper)
+#   pd_ratio = fixed-k EB ablation (this fork's own EB-with-fixed-theta path,
+#              NOT a reproduction of the paper's v0 scheduler — paper v0 is
+#              implemented on the older vLLM v0 codebase in a separate repo
+#              and its numbers should be sourced from there, not from this
+#              file's pd_ratio runs).
 # ---------------------------------------------------------------------------
 lookup_bn() {
     local workload=$1 scheduler=$2
@@ -97,70 +105,70 @@ lookup_bn() {
     case "${gpu_key}:${model_key}:${workload}:${scheduler}" in
         # ===== H200, Qwen3-8B =====
         H200:Qwen3-8B:sharegpt:baseline)        echo "10240,1024" ;;  # v1
-        H200:Qwen3-8B:sharegpt:pd_ratio)        echo "18432,2048" ;;  # v0
+        H200:Qwen3-8B:sharegpt:pd_ratio)        echo "18432,2048" ;;
         H200:Qwen3-8B:sharegpt:pd_ifr)          echo "16384,1536" ;;  # EB(k_hat^*)
 
         H200:Qwen3-8B:longbench:baseline)       echo "14336,256"  ;;  # v1
-        H200:Qwen3-8B:longbench:pd_ratio)       echo "18432,256"  ;;  # v0
+        H200:Qwen3-8B:longbench:pd_ratio)       echo "18432,256"  ;;
         H200:Qwen3-8B:longbench:pd_ifr)         echo "14336,2048" ;;  # EB(k_hat^*)
 
         H200:Qwen3-8B:wildchat:baseline)        echo "4096,2048"  ;;  # v1
-        H200:Qwen3-8B:wildchat:pd_ratio)        echo "18432,1536" ;;  # v0
+        H200:Qwen3-8B:wildchat:pd_ratio)        echo "18432,1536" ;;
         H200:Qwen3-8B:wildchat:pd_ifr)          echo "16384,1024" ;;  # EB(k_hat^*)
 
         H200:Qwen3-8B:numina_math:baseline)     echo "14336,256"  ;;  # v1
-        H200:Qwen3-8B:numina_math:pd_ratio)     echo "10240,256"  ;;  # v0
+        H200:Qwen3-8B:numina_math:pd_ratio)     echo "10240,256"  ;;
         H200:Qwen3-8B:numina_math:pd_ifr)       echo "18432,256"  ;;  # EB(k_hat^*)
 
         # ===== H200, Qwen3-30B-A3B (paper Appendix tab:optimal-config-h200) =====
         H200:Qwen3-30B-A3B:sharegpt:baseline)     echo "8192,2048"  ;;  # v1
-        H200:Qwen3-30B-A3B:sharegpt:pd_ratio)     echo "14336,1536" ;;  # v0
+        H200:Qwen3-30B-A3B:sharegpt:pd_ratio)     echo "14336,1536" ;;
         H200:Qwen3-30B-A3B:sharegpt:pd_ifr)       echo "4096,1536"  ;;  # EB(k_hat^*)
 
         H200:Qwen3-30B-A3B:longbench:baseline)    echo "14336,2048" ;;  # v1
-        H200:Qwen3-30B-A3B:longbench:pd_ratio)    echo "18432,256"  ;;  # v0
+        H200:Qwen3-30B-A3B:longbench:pd_ratio)    echo "18432,256"  ;;
         H200:Qwen3-30B-A3B:longbench:pd_ifr)      echo "16384,1024" ;;  # EB(k_hat^*)
 
         H200:Qwen3-30B-A3B:wildchat:baseline)     echo "4096,1536"  ;;  # v1
-        H200:Qwen3-30B-A3B:wildchat:pd_ratio)     echo "16384,1024" ;;  # v0
+        H200:Qwen3-30B-A3B:wildchat:pd_ratio)     echo "16384,1024" ;;
         H200:Qwen3-30B-A3B:wildchat:pd_ifr)       echo "14336,1024" ;;  # EB(k_hat^*)
 
         H200:Qwen3-30B-A3B:numina_math:baseline)  echo "8192,512"   ;;  # v1
-        H200:Qwen3-30B-A3B:numina_math:pd_ratio)  echo "10240,1024" ;;  # v0
+        H200:Qwen3-30B-A3B:numina_math:pd_ratio)  echo "10240,1024" ;;
         H200:Qwen3-30B-A3B:numina_math:pd_ifr)    echo "10240,512"  ;;  # EB(k_hat^*)
 
         # ===== RTX PRO 6000, Qwen3-8B =====
         RTXPRO6000:Qwen3-8B:sharegpt:baseline)        echo "16384,1536" ;;  # v1
-        RTXPRO6000:Qwen3-8B:sharegpt:pd_ratio)        echo "14336,1536" ;;  # v0
+        RTXPRO6000:Qwen3-8B:sharegpt:pd_ratio)        echo "14336,1536" ;;
         RTXPRO6000:Qwen3-8B:sharegpt:pd_ifr)          echo "14336,1536" ;;  # EB(k_hat^*)
 
         RTXPRO6000:Qwen3-8B:longbench:baseline)       echo "10240,1024" ;;  # v1
-        RTXPRO6000:Qwen3-8B:longbench:pd_ratio)       echo "16384,512"  ;;  # v0
+        RTXPRO6000:Qwen3-8B:longbench:pd_ratio)       echo "16384,512"  ;;
         RTXPRO6000:Qwen3-8B:longbench:pd_ifr)         echo "16384,512"  ;;  # EB(k_hat^*)
 
         RTXPRO6000:Qwen3-8B:wildchat:baseline)        echo "18432,1024" ;;  # v1
-        RTXPRO6000:Qwen3-8B:wildchat:pd_ratio)        echo "18432,1024" ;;  # v0
+        RTXPRO6000:Qwen3-8B:wildchat:pd_ratio)        echo "18432,1024" ;;
         RTXPRO6000:Qwen3-8B:wildchat:pd_ifr)          echo "10240,1024" ;;  # EB(k_hat^*)
 
         RTXPRO6000:Qwen3-8B:numina_math:baseline)     echo "14336,256"  ;;  # v1
-        RTXPRO6000:Qwen3-8B:numina_math:pd_ratio)     echo "8192,256"   ;;  # v0
+        RTXPRO6000:Qwen3-8B:numina_math:pd_ratio)     echo "8192,256"   ;;
         RTXPRO6000:Qwen3-8B:numina_math:pd_ifr)       echo "4096,256"   ;;  # EB(k_hat^*)
 
         # ===== RTX PRO 6000, Qwen3-30B-A3B (paper Appendix tab:optimal-config-a6000) =====
         RTXPRO6000:Qwen3-30B-A3B:sharegpt:baseline)     echo "8192,1536"  ;;  # v1
-        RTXPRO6000:Qwen3-30B-A3B:sharegpt:pd_ratio)     echo "4096,1024"  ;;  # v0
+        RTXPRO6000:Qwen3-30B-A3B:sharegpt:pd_ratio)     echo "4096,1024"  ;;
         RTXPRO6000:Qwen3-30B-A3B:sharegpt:pd_ifr)       echo "10240,1024" ;;  # EB(k_hat^*)
 
         RTXPRO6000:Qwen3-30B-A3B:longbench:baseline)    echo "14336,2048" ;;  # v1
-        RTXPRO6000:Qwen3-30B-A3B:longbench:pd_ratio)    echo "14336,256"  ;;  # v0
+        RTXPRO6000:Qwen3-30B-A3B:longbench:pd_ratio)    echo "14336,256"  ;;
         RTXPRO6000:Qwen3-30B-A3B:longbench:pd_ifr)      echo "16384,256"  ;;  # EB(k_hat^*)
 
         RTXPRO6000:Qwen3-30B-A3B:wildchat:baseline)     echo "14336,1024" ;;  # v1
-        RTXPRO6000:Qwen3-30B-A3B:wildchat:pd_ratio)     echo "10240,512"  ;;  # v0
+        RTXPRO6000:Qwen3-30B-A3B:wildchat:pd_ratio)     echo "10240,512"  ;;
         RTXPRO6000:Qwen3-30B-A3B:wildchat:pd_ifr)       echo "18432,512"  ;;  # EB(k_hat^*)
 
         RTXPRO6000:Qwen3-30B-A3B:numina_math:baseline)  echo "14336,256"  ;;  # v1
-        RTXPRO6000:Qwen3-30B-A3B:numina_math:pd_ratio)  echo "10240,512"  ;;  # v0
+        RTXPRO6000:Qwen3-30B-A3B:numina_math:pd_ratio)  echo "10240,512"  ;;
         RTXPRO6000:Qwen3-30B-A3B:numina_math:pd_ifr)    echo "16384,256"  ;;  # EB(k_hat^*)
 
         # ===== H200, cross-model (paper §4.5.2 Figure 7 — paper uses RTX PRO 6000,
@@ -221,10 +229,11 @@ mkdir -p "$OUTPUT_DIR"
 init_experiment_env
 select_gpus "$MAX_GPUS"
 
-# pd_ratio (the script's CFR / fixed-theta* variant) is skipped by default
-# because this repo only releases v1 vs EB(k_hat^*).  Paper Table v0 numbers
-# were obtained on a separate vLLM build and are not reproduced here.  Add
-# pd_ratio back via:  SCHEDULERS="baseline pd_ratio pd_ifr" ./run_optimal_only.sh ...
+# pd_ratio (the script's fixed-theta* EB ablation; k_mode=ratio) is skipped
+# by default because this fork releases only v1 vs EB(k_hat^*).  Paper Table
+# v0 numbers were obtained on a separate vLLM v0 codebase and are NOT
+# reproduced by pd_ratio here.  Add pd_ratio back as an ablation only via:
+#     SCHEDULERS="baseline pd_ratio pd_ifr" ./run_optimal_only.sh ...
 SCHEDULERS=${SCHEDULERS:-"baseline pd_ifr"}
 
 echo "========================================"

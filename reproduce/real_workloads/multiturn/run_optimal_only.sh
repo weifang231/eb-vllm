@@ -6,8 +6,10 @@
 #
 # Scheduler -> paper-vocab mapping (see evaluation.tex §4.3.1):
 #   baseline = v1 (vLLM default mixed batching)
-#   pd_ratio = v0 (exclusive batching, EB(k=1) under heavy traffic)
 #   pd_ifr   = EB(k_hat^*) (adaptive threshold)
+#   pd_ratio = fixed-k EB ablation (k_mode=ratio); NOT a reproduction of
+#              the paper's v0 scheduler — paper v0 lives in a separate
+#              vLLM v0 repo and should be sourced from there.
 #
 # All three schedulers may have *different* optimal (B, N), so each runs in its
 # own run_benchmark.sh invocation (single-cell queue per call).  Output dir is
@@ -71,22 +73,22 @@ fi
 case "$GPU_TAG_DETECTED:$MODEL_TAG:$WORKLOAD" in
     H200:Qwen3-8B:wildchat)
         BN_BASELINE="4096 2048"     # v1     (tab:optimal-config-h200)
-        BN_PD_RATIO="18432 1536"    # v0
+        BN_PD_RATIO="18432 1536"    # fixed-k EB ablation
         BN_PD_IFR="16384 1024"      # EB(k_hat^*)
         ;;
     H200:Qwen3-30B-A3B:wildchat)
         BN_BASELINE="4096 1536"     # v1     (tab:optimal-config-h200)
-        BN_PD_RATIO="16384 1024"    # v0
+        BN_PD_RATIO="16384 1024"    # fixed-k EB ablation
         BN_PD_IFR="14336 1024"      # EB(k_hat^*)
         ;;
     RTXPRO6000:Qwen3-8B:wildchat)
         BN_BASELINE="18432 1024"    # v1     (tab:optimal-config-a6000)
-        BN_PD_RATIO="18432 1024"    # v0
+        BN_PD_RATIO="18432 1024"    # fixed-k EB ablation
         BN_PD_IFR="10240 1024"      # EB(k_hat^*)
         ;;
     RTXPRO6000:Qwen3-30B-A3B:wildchat)
         BN_BASELINE="14336 1024"    # v1     (tab:optimal-config-a6000)
-        BN_PD_RATIO="10240 512"     # v0
+        BN_PD_RATIO="10240 512"     # fixed-k EB ablation
         BN_PD_IFR="18432 512"       # EB(k_hat^*)
         ;;
     # Scalability cross-model (paper §4.5.2, RTX PRO 6000, WildChat).
@@ -95,7 +97,7 @@ case "$GPU_TAG_DETECTED:$MODEL_TAG:$WORKLOAD" in
     # same workload, similar param count).
     RTXPRO6000:Meta-Llama-3.1-8B-Instruct:wildchat|RTXPRO6000:Mathstral-7B-v0.1:wildchat|RTXPRO6000:Qwen2.5-Coder-7B:wildchat|RTXPRO6000:DeepSeek-R1-Distill-Qwen-7B:wildchat)
         BN_BASELINE="18432 1024"    # v1     (proxy from Qwen3-8B)
-        BN_PD_RATIO="18432 1024"    # v0     (proxy)
+        BN_PD_RATIO="18432 1024"    # fixed-k EB ablation (proxy)
         BN_PD_IFR="10240 1024"      # EB(k_hat^*)   (proxy)
         ;;
     *) echo "Error: unsupported (GPU=$GPU_TAG_DETECTED, model=$MODEL_TAG, workload=$WORKLOAD)"; exit 1 ;;
@@ -109,7 +111,7 @@ echo "  dataset    : $DATASET_PATH"
 echo "  gpus       : $NUM_GPUS"
 echo "  schedulers : $SCHEDULERS"
 echo "  baseline (v1)         B,N = ${BN_BASELINE}"
-echo "  pd_ratio (v0)         B,N = ${BN_PD_RATIO}"
+echo "  pd_ratio (fixed-k EB) B,N = ${BN_PD_RATIO}"
 echo "  pd_ifr   (EB(k_hat*)) B,N = ${BN_PD_IFR}"
 echo
 
@@ -126,7 +128,7 @@ run_one() {
 for sched in $SCHEDULERS; do
     case "$sched" in
         baseline) run_one "baseline (v1)"        baseline "$BN_BASELINE" ;;
-        pd_ratio) run_one "pd_ratio (v0)"        pd_ratio "$BN_PD_RATIO" ;;
+        pd_ratio) run_one "pd_ratio (fixed-k EB)" pd_ratio "$BN_PD_RATIO" ;;
         pd_ifr)   run_one "pd_ifr   (EB(k_hat*))" pd_ifr  "$BN_PD_IFR" ;;
         pd_auto)  run_one "pd_auto  (EB+)"       pd_auto "$BN_PD_IFR" ;;
         *) echo "Error: unknown scheduler '$sched' (expected baseline/pd_ratio/pd_ifr/pd_auto)"; exit 1 ;;

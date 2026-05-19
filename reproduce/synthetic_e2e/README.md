@@ -1,8 +1,11 @@
 # §4.3.1 — Synthetic end-to-end
 
-`(B, N)` grid search of v0 / v1 / EB(k̂\*) across three synthetic workloads
+`(B, N)` grid search of v1 / EB(k̂\*) across three synthetic workloads
 (decode-heavy 128/1024, balanced 512/512, prefill-heavy 1024/128). Backs
 Fig. `fig_synthetic_e2e.pdf`.
+
+> The paper's v0 column for Fig. `fig_synthetic_e2e.pdf` comes from a
+> separate vLLM v0 codebase, not from this fork.
 
 ## Files
 

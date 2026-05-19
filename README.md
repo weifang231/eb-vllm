@@ -83,7 +83,7 @@ The new scheduler code lives in [`vllm/v1/core/sched/`](vllm/v1/core/sched/). Re
 ```bash
 VLLM_USE_PD_SCHEDULER=1 \
 VLLM_PD_SCHEDULER_MODE=auto \
-VLLM_PD_K_MODE=cfr \
+VLLM_PD_K_MODE=ifr \
 VLLM_PD_AUTO_COMPUTE_N=1 \
 VLLM_PD_OOM_TOLERANCE=0.01 \
 VLLM_PD_CALIBRATION_FILE=reproduce/calibration/pd_calibration_Qwen3-8B_H200.json \
@@ -99,7 +99,7 @@ If you've already profiled your hardware as memory-bandwidth-bound and want to s
 
 ```bash
 VLLM_USE_PD_SCHEDULER=1 \
-VLLM_PD_K_MODE=cfr \
+VLLM_PD_K_MODE=ifr \
 VLLM_PD_AUTO_COMPUTE_N=1 \
 VLLM_PD_OOM_TOLERANCE=0.01 \
 VLLM_PD_CALIBRATION_FILE=reproduce/calibration/pd_calibration_Qwen3-8B_H200.json \
