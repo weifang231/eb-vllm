@@ -6,7 +6,7 @@ Times below are wall-clock estimates on 8×RTX PRO 6000 Blackwell (96 GB each).
 ## 0. Environment
 
 ```bash
-# Build vLLM from this fork (release/icml2026 branch, tagged icml2026-camera-ready)
+# Build vLLM from this fork (default branch `main`, also tagged `v-icml2026-cr-rc1`)
 cd <repo-root>
 python -m venv .venv && source .venv/bin/activate
 pip install torch                                   # match your CUDA

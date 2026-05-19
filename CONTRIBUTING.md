@@ -12,10 +12,10 @@ Inference* (ICML 2026), built on top of
   [weifang231/eb-vllm](https://github.com/weifang231/eb-vllm/issues).
 - **Contributions to the EB / MB scheduler** (`vllm/v1/core/sched/`) or
   to the reproduction harness (`reproduce/`) — pull requests are welcome
-  on this repository. The `release/icml2026` branch tracks the
-  camera-ready snapshot and is kept frozen for reproducibility; active
-  development happens on a separate branch (see the README for the
-  current development target).
+  on this repository against `main`. The camera-ready snapshot is
+  preserved as the `v-icml2026-cr-rc1` tag (and successor `v-icml2026-cr*`
+  tags as the camera-ready iterates); reviewers wanting the exact
+  paper-time code should `git checkout v-icml2026-cr-rc1`.
 - **Contributions to upstream vLLM** (anything outside the paths above)
   — please file them at
   [vllm-project/vllm](https://github.com/vllm-project/vllm) following

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression tests for env-controlled knobs added by the EB/MB scheduler.
 
-Covers three flags introduced on the release/icml2026 branch that have no
+Covers three flags introduced on the eb-vllm fork that have no
 upstream test coverage:
 
   * ``VLLM_PD_THETA_FLOOR``       — IFR theta* lower bound, read in ``__init__``

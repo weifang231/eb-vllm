@@ -10,7 +10,8 @@ scripts that reproduce every figure and table in the paper. Each
 # 1. Clone + setup environment
 git clone https://github.com/weifang231/eb-vllm
 cd eb-vllm
-git checkout release/icml2026
+# `main` is the default branch and tracks the camera-ready snapshot.
+# For the exact reviewed code, also: `git checkout v-icml2026-cr-rc1`
 python -m venv .venv && source .venv/bin/activate     # OR: conda create -n eb python=3.12
 pip install torch                                       # match your CUDA
 VLLM_USE_PRECOMPILED=1 pip install -e . --no-build-isolation

@@ -84,7 +84,7 @@ preflight() {
     # 2. Verify KV-aware patch present
     if ! grep -q "KV-AWARE GUARD" vllm/v1/core/sched/scheduler.py; then
         log "  ✗ KV-AWARE GUARD missing from scheduler.py"
-        log "    Try: git pull --ff-only origin release/icml2026"
+        log "    Try: git pull --ff-only origin main"
         exit 1
     fi
     log "  ✓ KV-AWARE GUARD present"
