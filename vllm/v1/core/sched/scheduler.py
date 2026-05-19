@@ -17,7 +17,7 @@ import os
 import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Final
 
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -67,6 +67,13 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
+
+# Absolute lower bound on the adaptive theta* threshold. Used by both the
+# raw bisection solver (`_compute_optimal_ratio`) as a numerical safety
+# floor and by the online controllers as a hard min on top of the
+# user-configurable VLLM_PD_THETA_FLOOR (whose default is also this value).
+# Anywhere theta is computed or clamped, the result must be >= this.
+_PD_THETA_HARD_MIN: Final[float] = 0.01
 
 
 class Scheduler(SchedulerInterface):
@@ -736,7 +743,7 @@ class Scheduler(SchedulerInterface):
 
         # Edge case: if C is very small, θ* ≈ 0
         if C <= 1e-6:
-            return 0.01  # Use 1% as the lower bound
+            return _PD_THETA_HARD_MIN  # numerical safety floor
 
         # Bisection search
         lo, hi = 0.001, 0.999
@@ -752,8 +759,11 @@ class Scheduler(SchedulerInterface):
 
         theta_star = (lo + hi) / 2
 
-        # Clamp to reasonable range [0.01, 0.99]
-        theta_star = max(0.01, min(0.99, theta_star))
+        # Clamp to reasonable range: [_PD_THETA_HARD_MIN, 0.99]. The 0.99
+        # upper bound is the math solver's domain limit (theta -> 1 makes
+        # ln(1-theta) blow up); the policy-side cap pd_theta_max (default
+        # 0.80) is applied separately in the online update path.
+        theta_star = max(_PD_THETA_HARD_MIN, min(0.99, theta_star))
 
         logger.debug(
             f"Computed optimal ratio: θ*={theta_star:.4f} "
@@ -784,13 +794,13 @@ class Scheduler(SchedulerInterface):
         import math
 
         if p_0 <= 0.0:
-            return 0.01
+            return _PD_THETA_HARD_MIN
         if p_0 >= 1.0 - 1e-9:
             return 0.99
 
         rhs = (-math.log(1.0 - p_0)) * self.pd_alpha_p / self.pd_alpha_d
         if rhs <= 1e-12:
-            return 0.01
+            return _PD_THETA_HARD_MIN
 
         def f(theta: float) -> float:
             if theta <= 0.0 or theta >= 1.0:
@@ -805,7 +815,7 @@ class Scheduler(SchedulerInterface):
             else:
                 hi = mid
         theta_zero = 0.5 * (lo + hi)
-        return max(0.01, min(0.99, theta_zero))
+        return max(_PD_THETA_HARD_MIN, min(0.99, theta_zero))
 
     def _compute_midpoint_k(
         self, theta_zero: float, p_0: float, n: int, mu_L: float
@@ -1172,7 +1182,7 @@ class Scheduler(SchedulerInterface):
 
         # Step 4: Clamp to θ_max
         theta_star = min(theta_star, self.pd_theta_max)
-        theta_star = max(0.01, theta_star)
+        theta_star = max(_PD_THETA_HARD_MIN, theta_star)
 
         logger.debug(
             f"IFR optimal ratio: θ*={theta_star:.4f} "
@@ -1213,10 +1223,15 @@ class Scheduler(SchedulerInterface):
             delta_theta = 0.0
             theta_star = theta_0
 
-        # Step 4: Clamp to [max(0.01, theta_floor), θ_max].
-        # theta_floor (env VLLM_PD_THETA_FLOOR, default 0.0) is a regularising
-        # lower bound on the adaptive controller — see __init__ comment for why.
-        theta_star = max(0.01, self.pd_theta_floor, min(theta_star, self.pd_theta_max))
+        # Step 4: Clamp to [theta_floor (>= _PD_THETA_HARD_MIN), pd_theta_max].
+        # theta_floor (env VLLM_PD_THETA_FLOOR, default _PD_THETA_HARD_MIN)
+        # is a regularising lower bound on the adaptive controller — see
+        # __init__ comment for why.
+        theta_star = max(
+            _PD_THETA_HARD_MIN,
+            self.pd_theta_floor,
+            min(theta_star, self.pd_theta_max),
+        )
 
         # Step 5: EMA smoothing to damp oscillations from noisy estimates.
         # During cold start (first update), assign directly.
@@ -1264,7 +1279,7 @@ class Scheduler(SchedulerInterface):
 
         # Step 2: θ_0 from the exact formula.
         theta_zero = self._compute_theta_zero_exact(p_0)
-        theta_zero_clamped = max(0.01, min(self.pd_theta_max, theta_zero))
+        theta_zero_clamped = max(_PD_THETA_HARD_MIN, min(self.pd_theta_max, theta_zero))
 
         # Step 3: Optional dynamic N̂ from memory-safe sizing (Prop. memory).
         if self.pd_auto_compute_n:
@@ -1278,7 +1293,6 @@ class Scheduler(SchedulerInterface):
         k_hat_real, m_minus, m_plus, m_star = self._compute_midpoint_k(
             theta_zero_clamped, p_0, n_eff, mu_L
         )
-        max(1, min(n_eff - 1, int(round(k_hat_real))))
 
         # Step 5: Diagnostic Δ(N) (used by adaptive selector / auto mode).
         delta_diag = self._compute_diagnostic_delta(
@@ -1287,7 +1301,7 @@ class Scheduler(SchedulerInterface):
 
         # Step 6: EMA smoothing on the realised θ̂ = k̂ / N̂ to damp noise.
         theta_hat = k_hat_real / float(n_eff)
-        theta_hat = max(0.01, min(self.pd_theta_max, theta_hat))
+        theta_hat = max(_PD_THETA_HARD_MIN, min(self.pd_theta_max, theta_hat))
         if not self.pd_ifr_theta_initialized:
             self.pd_k_ratio = theta_hat
             self.pd_ifr_theta_initialized = True
