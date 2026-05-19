@@ -25,9 +25,8 @@ Inference* (ICML 2026), built on top of
 ## Reproducing the paper
 
 See [`reproduce/README.md`](reproduce/README.md) for the full
-reproduction recipe and
-[`reproduce/REPRODUCTION_REPORT.md`](reproduce/REPRODUCTION_REPORT.md)
-for the per-figure status of what we have verified.
+reproduction recipe (per-figure status, dataset preparation, calibration,
+and the recommended run order).
 
 ## License
 

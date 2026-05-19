@@ -30,7 +30,7 @@ new knobs.
 
 | Var | Default | Type | Audience | Read site | Notes |
 |---|---|---|---|---|---|
-| `VLLM_PD_CALIBRATION_FILE` | `""` | path | user | `calibration.py:604` | JSON with per-(model, GPU) α\_p/β\_p/α\_d/β\_d. Sample: `reproduce/calibration/pd_calibration_Qwen3-8B_H200.json`. See `reproduce/calibration/README.md` for how to generate. |
+| `VLLM_PD_CALIBRATION_FILE` | `""` | path | user | `calibration.py:609` | JSON with per-(model, GPU) α\_p/β\_p/α\_d/β\_d. Sample: `reproduce/calibration/pd_calibration_Qwen3-8B_H200.json`. See `reproduce/calibration/README.md` for how to generate. |
 | `VLLM_PD_ALPHA_P` | — | float | advanced | `scheduler.py:266` | Override α\_p (prefill constant). No default — only honoured if calibration file is missing **and** all four α/β envs are set. |
 | `VLLM_PD_BETA_P`  | — | float | advanced | `scheduler.py:267` | Override β\_p (prefill slope, per-token). |
 | `VLLM_PD_ALPHA_D` | — | float | advanced | `scheduler.py:268` | Override α\_d (decode constant). |
@@ -41,7 +41,7 @@ new knobs.
 
 | Var | Default | Type | Audience | Read site | Notes |
 |---|---|---|---|---|---|
-| `VLLM_PD_K_MODE` | `direct` | `direct \| ratio \| ifr` | paper | `scheduler.py:241` | How θ\* is chosen. `direct`=fixed k\*; `ratio`=fixed θ\*; `ifr`=online IFR estimator (paper §4.3). |
+| `VLLM_PD_K_MODE` | `direct` | `direct \| ratio \| ifr \| cfr` | paper | `scheduler.py:241` | How θ\* is chosen. `direct`=fixed k\*; `ratio`=fixed θ\*; `ifr`=online IFR estimator (paper §4.3); `cfr`=online CFR estimator (η ≡ 0, used by EB⁺ Quick Start). |
 | `VLLM_PD_K_STAR` | `""` | int | paper | `scheduler.py:243` | In `direct` mode: pin batch size to this k\*. |
 | `VLLM_PD_K_RATIO` | `""` | float ∈ (0,1) | paper | `scheduler.py:247` | In `ratio` mode: pin θ\* to this value. |
 | `VLLM_PD_IFR_WINDOW_SIZE` | `500` | int | advanced | `scheduler.py:306` | IFR sliding-window size (requests). Smaller → more reactive, noisier. |
@@ -84,7 +84,6 @@ diagnostic Δ(N) compares the amortised cost of one MB step vs. one EB step.
 |---|---|---|---|---|---|
 | `VLLM_PD_PARAM_UPDATE_INTERVAL` | `100` | int | advanced | `scheduler.py:416` | How often (in scheduler ticks) to refresh per-workload aggregates (μ\_L, μ\_O, etc.). |
 | `VLLM_PD_N_UPDATE_COOLDOWN` | `2.0` | float (sec) | advanced | `scheduler.py:436` | Minimum wall-clock seconds between N-updates. Prevents thrash on bursty inputs. |
-| `VLLM_PD_MIN_N_FLOOR_DIV` | `10` | int | advanced | (listed in §4) | (Listed in §4 for completeness — it bounds N from below.) |
 
 ## 7. Diagnostics (off by default; set by reproduce scripts)
 
@@ -124,7 +123,7 @@ for details.
 
 ## Future work
 
-These 35 vars are currently read inline via `os.environ.get(...)` scattered
+These 33 vars are currently read inline via `os.environ.get(...)` scattered
 through `scheduler.py`. The upstream vLLM convention is to register all env
 vars in `vllm/envs.py` (a single `environment_variables: dict[str, Callable]`
 with type hints + defaults). Migrating to that convention would:
