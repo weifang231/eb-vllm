@@ -135,13 +135,18 @@ to a per-GPU file first, then the legacy non-GPU name.
 
 ```bash
 cd cost_model/linear_model
-python benchmark_execution_time.py --output results.json
+# benchmark_execution_time.py is two-mode (run/plot) — pass the `run`
+# subcommand and use --output-json (not --output) per its CLI.
+python benchmark_execution_time.py run --output-json results.json
 python analyze_prefill_linearity_all.py
-python plot_execution_time.py --output execution_time.pdf
+# plot_execution_time.py reads --input and writes --output.
+python plot_execution_time.py --input results.json --output execution_time.pdf
 
 cd ../kernel_breakdown
 python benchmark_flash_attn_sweep.py --output results_$(hostname).json
-python plot_kernel_breakdown.py --output kernel_breakdown.pdf
+# plot_kernel_breakdown.py takes one or more --inputs (json files).
+python plot_kernel_breakdown.py --inputs results_$(hostname).json \
+    --output kernel_breakdown.pdf
 ```
 
 ## 3. §3 — Hazard rate (≈1 h)
@@ -171,42 +176,87 @@ cd ../synthetic_e2e
 MODEL=Qwen/Qwen3-8B    ./run_grid_search.sh 8    # ~1.5 h
 MODEL=Qwen/Qwen3-30B-A3B ./run_grid_search.sh 8  # ~7-8 h
 python analyze_e2e.py outputs/e2e_grid_search/<GPU>_<MODEL>
-python plot_synthetic_e2e.py --output fig_synthetic_e2e.pdf
+# plot_synthetic_e2e.py needs --grid-search-dir to find per-(B,N) bench files.
+python plot_synthetic_e2e.py \
+    --grid-search-dir outputs/e2e_grid_search/<GPU>_<MODEL> \
+    --output fig_synthetic_e2e.pdf
 ```
+
+> §4.3.1 figure's v0 column comes from a separate vLLM-v0 codebase
+> (`run_grid_search.sh` here only emits v1 and EB(k̂*)). See
+> `synthetic_e2e/README.md`.
 
 ## 6. §4.3.2/3 — Real workloads (≈6–10 h per (model, GPU))
 
+`run_grid_search.sh` is per-workload — it takes a JSONL path as its first
+positional argument. Step 1 produces the four protocol-correct JSONLs (§4.1
+caps applied at export time), step 2 runs the (B, N) grid for each, step 3
+aggregates them into `optimal_per_scheduler.json`, step 4 plots.
+
 ```bash
 cd ../real_workloads
-MODEL=Qwen/Qwen3-8B GPUS=0,1,2,3 ./run_grid_search.sh
-python analyze_grid_search.py outputs/<GPU>_<MODEL>/
+
+# 1. Export the four workloads once (caps from §4.1 baked into the JSONL).
+#    `reproduce/` isn't a Python package, so invoke export_dataset.py by path.
+mkdir -p ../outputs
+python ../common/export_dataset.py --dataset sharegpt \
+    --num-samples 4000 --apply-chat-template \
+    --output ../outputs/sharegpt_prompts.jsonl
+python ../common/export_dataset.py --dataset longbench \
+    --num-samples 4000 --apply-chat-template \
+    --output ../outputs/longbench_prefill.jsonl
+python ../common/export_dataset.py --dataset numina_math \
+    --num-samples 4000 --min-output-len 800 --apply-chat-template \
+    --output ../outputs/numina_math_prompts.jsonl
+# WildChat is multi-turn; its export lives in `multiturn/` and emits .json
+# (not .jsonl). Defaults pulled from §4.1: 3000 conversations × min 6 turns
+# (≈27,900 requests total).
+python multiturn/export_dataset.py \
+    --num-conversations 3000 --min-turns 6 \
+    --output ../outputs/wildchat_multiturn.json
+
+# 2. Per-workload (B, N) grid search. Each call writes to its own
+#    grid_search_<DATASET>_<MODEL>_... output dir.
+for ds in sharegpt_prompts longbench_prefill numina_math_prompts; do
+    MODEL=Qwen/Qwen3-8B ./run_grid_search.sh ../outputs/${ds}.jsonl 4
+done
+# WildChat runs via the dedicated multi-turn harness, not run_grid_search.sh.
+# It expects the JSON (not JSONL) emitted by the previous step.
+MODEL=Qwen/Qwen3-8B bash multiturn/run_benchmark.sh ../outputs/wildchat_multiturn.json 4
+
+# 3. Analyse each per-workload dir, then aggregate into one file.
+#    Both single-turn (grid_search_*) and multi-turn WildChat (multiturn_*)
+#    dirs use the same tb*/bs* layout, so analyze_grid_search.py handles both.
+for d in ../outputs/grid_search_*_Qwen3-8B_Con_*_Prompts_* \
+         ../outputs/multiturn_*_Qwen3-8B_*; do
+    [ -d "$d" ] && python analyze_grid_search.py "$d"
+done
+python build_optimal_json.py ../outputs/ \
+    --output ../outputs/optimal_per_scheduler_Qwen3-8B.json
+
+# 4. Plot.
 python plot_real_workload_latency.py \
-    --optimal-json outputs/<GPU>_<MODEL>/optimal_per_scheduler.json \
+    --optimal-json ../outputs/optimal_per_scheduler_Qwen3-8B.json \
     --ttft-output ttft.pdf --tpot-output tpot.pdf
 ```
 
-**Workload protocol** (paper §4.1; set `IGNORE_EOS` and `CUSTOM_OUTPUT_LEN`
-to match the per-workload truncation cap):
+**Workload protocol** (paper §4.1). The per-workload output cap is applied
+at *dataset export time* (`export_dataset.py --output-len-cap`, defaulted to
+500 for ShareGPT and 4000 for NuminaMath); the runner then replays each
+request at its recorded natural length under `IGNORE_EOS=true`. Auto-resolved
+defaults per dataset basename:
 
-| Workload | `CUSTOM_OUTPUT_LEN` | `IGNORE_EOS` | Notes |
-|----------|---------------------|--------------|-------|
-| ShareGPT | `-1` (dataset-native, cap ≤500) | `true` | output mean ≈ 280 tok |
-| LongBench | `20` | `true` | forced short output |
-| NumimaMath | `4000` | `true` | forced full chain-of-thought |
-| WildChat | n/a | n/a | multi-turn chat-mode, see `multiturn/` |
+| Workload | `CUSTOM_OUTPUT_LEN` | `IGNORE_EOS` | Export-time cap |
+|----------|---------------------|--------------|-----------------|
+| ShareGPT | `-1` | `true` | 500 (default) |
+| LongBench | `20` | `true` | n/a (forced short) |
+| NuminaMath | `-1` | `true` | 4000 (default), `--min-output-len 800` |
+| WildChat | n/a (multi-turn) | n/a | n/a (see `multiturn/`) |
 
-Single-cell example (optimal `(B, N)` from Appendix `tab:optimal-config-h200`):
-```bash
-IGNORE_EOS=true CUSTOM_OUTPUT_LEN=500 MODEL=Qwen/Qwen3-8B \
-    ./run_optimal_only.sh ../outputs/sharegpt_prompts.jsonl 1
-IGNORE_EOS=true CUSTOM_OUTPUT_LEN=20 MODEL=Qwen/Qwen3-8B \
-    ./run_optimal_only.sh ../outputs/longbench_prefill.jsonl 1
-IGNORE_EOS=true CUSTOM_OUTPUT_LEN=4000 MODEL=Qwen/Qwen3-8B \
-    ./run_optimal_only.sh ../outputs/numina_math_prompts.jsonl 1
-```
-
-For multi-turn dialogue (WildChat) preprocessing, see
-[`real_workloads/multiturn/`](real_workloads/multiturn/).
+If you want to run a single (B, N) cell from Appendix
+`tab:optimal-config-h200` rather than the whole grid, use
+`./run_optimal_only.sh <dataset.jsonl> <max-gpus>`; the same auto-detect
+applies.
 
 ## 7. §4.4 — EB⁺ (≈30 min for traffic, ≈2 h for non-stationary)
 
@@ -227,11 +277,17 @@ export VLLM_PD_MODE_SWITCH_DELTA=1e-5
 Then run the EB⁺ experiments:
 ```bash
 cd ../eb_plus/traffic
-MODEL=Qwen/Qwen3-8B ./run_adaptive_selector.sh 8
-python analyze_selector.py outputs/adaptive_selector/<GPU>_<MODEL>
+# Paper Table 4 (tab:eb_plus_traffic) needs μ_L=512, μ_O=256 × c∈{32,512,2048}.
+# Use the wrapper — `run_adaptive_selector.sh` directly only runs a single c
+# at a time and defaults to the generic decode/balanced/prefill scenarios.
+MODEL=Qwen/Qwen3-8B ./run_table4_sweep.sh 8
+for c in 32 512 2048; do
+    python analyze_selector.py outputs/adaptive_selector_table4/<GPU>_<MODEL>/c${c}
+done
 
 cd ../non_stationary
-python generate_distribution_shift_dataset.py
+# Both scripts generate their own synthetic dataset internally; do not call
+# generate_distribution_shift_dataset.py standalone.
 ./run_distribution_shift.sh 0    # positional arg = GPU_ID, not MAX_GPUS
 ./run_concurrency_shift.sh 1
 python plot_distribution_shift.py outputs/
@@ -243,20 +299,43 @@ LHS-RHS magnitude — try `1e-6` (or refit `(a, b, c)`).
 
 ## 8. §4.4 — Disaggregation comparison (≈4 h on 4 GPUs)
 
+The paper appendix tables (`app:disagg_2gpu`, `app:disagg_4gpu`) need
+multi-cell sweeps:
+- 2-GPU: μ_L=512, μ_O=256 × c∈{64, 512, 2048}
+- 4-GPU: 3 workloads (1024/128, 512/512, 128/1024) × c∈{128, 256, 512}
+
+The base `run_2gpu_comparison.sh` / `run_4gpu_comparison.sh` are single-cell
+runners — wrap them with the `_paper_sweep.sh` wrappers to get the paper
+matrices:
+
 ```bash
 cd ../../disagg
-./run_2gpu_comparison.sh
-./run_4gpu_comparison.sh
+./run_2gpu_paper_sweep.sh         # ~2 h — 3 cells, manifest in outputs/2gpu_paper_sweep_*/
+./run_4gpu_paper_sweep.sh         # ~6 h — 9 cells, manifest in outputs/4gpu_paper_sweep_*/
+
+# `run_disagg_baseline.sh` is a separate harness using vLLM's official P/D
+# disagg path; only run it if you need that comparison.
 ./run_disagg_baseline.sh
 ```
 
 ## 9. §4.4 — Long context (≈2 h)
 
+Paper appendix `tab:e2e-128k` is the 7-model 128K input / 64 output table;
+`run_128k_all_models.sh` fans this out across all seven models in parallel
+(one GPU each). `run_long_context_comparison.sh` is the single-model harness
+the wrapper calls internally — invoke it directly only if you want to run one
+model at a different (input_len, concurrency) cell.
+
 ```bash
 cd ../long_context
-./run_long_context_comparison.sh
-./run_128k_all_models.sh
-python plot_long_context.py outputs/long_context_summary.csv \
+./run_128k_all_models.sh                       # 7 models in parallel; ~1.5 h
+
+# Aggregate per-(model, context_len, scheduler) bench JSONs into the CSV that
+# plot_long_context.py expects.
+python aggregate.py ../outputs/ \
+    --output ../outputs/long_context_summary.csv
+
+python plot_long_context.py ../outputs/long_context_summary.csv \
     --output combined_ctx_comparison_tok1024.pdf
 ```
 

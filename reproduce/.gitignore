@@ -10,3 +10,7 @@
 # Misc local artefacts
 *.log
 nohup.out
+
+# Internal changelog of reproduction-harness patches (kept locally as a
+# regression-watch log; not part of the public reproduction surface).
+CHANGELOG.md
