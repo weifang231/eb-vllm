@@ -152,10 +152,15 @@ phase_A_real_workloads() {
         cal_path="$ROOT/reproduce/calibration/pd_calibration_${short}_${GPU_TAG}.json"
         export VLLM_PD_CALIBRATION_FILE="$cal_path"
 
+        # Paper §4.1 protocol: per-prompt output_len comes from the JSONL
+        # (already capped at export time by export_dataset.py: 500 for
+        # ShareGPT, 4000 for NuminaMath). CUSTOM_OUTPUT_LEN=-1 means "use the
+        # per-request output_len from the JSONL"; LongBench overrides to a
+        # forced constant 20 (no natural distribution in scope).
         for triple in \
             "sharegpt -1 ../outputs/sharegpt_prompts.jsonl" \
             "longbench 20 ../outputs/longbench_prefill.jsonl" \
-            "numina_math 4000 ../outputs/numina_math_prompts.jsonl" \
+            "numina_math -1 ../outputs/numina_math_prompts.jsonl" \
         ; do
             local wl ol ds out
             read -r wl ol ds <<< "$triple"
@@ -280,24 +285,23 @@ phase_D_eb_plus_traffic() {
     cd "$ROOT/reproduce/eb_plus/traffic"
     export VLLM_PD_MODE_SWITCH_DELTA="${VLLM_PD_MODE_SWITCH_DELTA:-1e-5}"
     # Paper Table 4: scenario μ_L=512 μ_O=256 (= "table4" preset) × concurrency
-    # sweep c ∈ {32, 512, 2048}. Without this loop the script would default to
-    # (decode_heavy / balanced / prefill_heavy) × single c, which is a
-    # *different* experiment.
+    # sweep c ∈ {32, 512, 2048}. Delegated to run_table4_sweep.sh so the
+    # one-click wrapper and the standalone reproduction path share the same
+    # cell layout (outputs/adaptive_selector_table4/<GPU>_<MODEL>/c<c>/).
     for MODEL in $MODELS; do
         local short
         short=$(model_short "$MODEL")
-        for c in 32 512 2048; do
-            local out="outputs/adaptive_selector/${GPU_TAG}_${short}_c${c}/.done"
-            if skip_if_exists "$out" "Table 4 $short c=$c"; then continue; fi
-            log "  Running EB+ traffic for $short c=$c ..."
-            GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) MODEL="$MODEL" \
-                SCENARIOS=table4 MAX_CONCURRENCY=$c \
-                OUTPUT_DIR="$PWD/outputs/adaptive_selector/${GPU_TAG}_${short}_c${c}" \
-                bash run_adaptive_selector.sh "$MAX_GPUS" \
-                > "$LOGDIR/D_${short}_c${c}.log" 2>&1
-            touch "$out"
-            log "  ✓ $short c=$c EB+ traffic done"
-        done
+        local sweep_root="outputs/adaptive_selector_table4/${GPU_TAG}_${short}"
+        local done_marker="${sweep_root}/.done"
+        if skip_if_exists "$done_marker" "Table 4 $short (all c)"; then continue; fi
+        log "  Running EB+ traffic sweep for $short (c∈{32,512,2048}) ..."
+        # run_table4_sweep.sh honours SKIP_EXISTING (default 1), so partial
+        # results from a previous interrupted run are picked up automatically.
+        GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) MODEL="$MODEL" \
+            bash run_table4_sweep.sh "$MAX_GPUS" \
+            > "$LOGDIR/D_${short}.log" 2>&1
+        touch "$done_marker"
+        log "  ✓ $short EB+ traffic sweep done"
     done
 }
 
