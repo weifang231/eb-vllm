@@ -34,7 +34,10 @@ GPU_ID=${1:-0}
 MODEL=${MODEL:-"Qwen/Qwen3-8B"}
 MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
 NUM_PROMPTS_PER_PHASE=${NUM_PROMPTS_PER_PHASE:-2000}
-CONCURRENCY_PHASES=${CONCURRENCY_PHASES:-"32:500,2048:4000,500:2000"}
+# Paper §4.4 (Tab 5 concurrency shift): c: 32 → 512 → 1024 → 256 → 2048 (5 phases).
+# Each phase uses 2k prompts; previous default ("32:500,2048:4000,500:2000") was
+# a 3-phase abbreviation that didn't match the paper.
+CONCURRENCY_PHASES=${CONCURRENCY_PHASES:-"32:2000,512:2000,1024:2000,256:2000,2048:2000"}
 INPUT_LEN=${INPUT_LEN:-512}
 OUTPUT_LEN=${OUTPUT_LEN:-256}
 OUTPUT_VARIANCE=${OUTPUT_VARIANCE:-0.25}

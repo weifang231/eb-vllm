@@ -82,6 +82,17 @@ if [ -z "${WORKLOAD:-}" ]; then
     esac
 fi
 
+# Paper workload protocol (REPRODUCE.md §4.1 — paper-faithful per-workload
+# output-length truncation). Set per-workload defaults AFTER auto-detection.
+# Pre-existing env override still wins.
+case "$WORKLOAD" in
+    sharegpt)    CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;    # dataset-native, cap ≤500
+    longbench)   CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-20} ;;    # forced short output
+    numina_math) CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-4000} ;;  # forced full chain-of-thought
+    wildchat)    CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;    # dataset-native; multi-turn path normally handles this
+esac
+IGNORE_EOS=${IGNORE_EOS:-true}
+
 # ---------------------------------------------------------------------------
 # Per-(GPU, model, workload, scheduler) (B, N) lookup, from paper Appendix
 # Tables tab:optimal-config-h200 / tab:optimal-config-a6000 (Qwen3-8B,
@@ -209,7 +220,7 @@ MAX_CONCURRENCY=${MAX_CONCURRENCY:-2048}
 NUM_WARMUP_REQUESTS=${NUM_WARMUP_REQUESTS:-20}
 K_RATIO=${K_RATIO:-0.8}
 BASE_PORT=${BASE_PORT:-11000}
-CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-4000}
+# CUSTOM_OUTPUT_LEN + IGNORE_EOS were set workload-aware earlier (see paper protocol block).
 ENABLE_THINKING=${ENABLE_THINKING:-true}
 
 # Hardware calibration file (required by eb_kratio / eb). Auto-resolve

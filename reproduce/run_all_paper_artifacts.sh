@@ -279,17 +279,25 @@ phase_D_eb_plus_traffic() {
     step "Phase D: EB+ traffic-level (Table 4)"
     cd "$ROOT/reproduce/eb_plus/traffic"
     export VLLM_PD_MODE_SWITCH_DELTA="${VLLM_PD_MODE_SWITCH_DELTA:-1e-5}"
+    # Paper Table 4: scenario μ_L=512 μ_O=256 (= "table4" preset) × concurrency
+    # sweep c ∈ {32, 512, 2048}. Without this loop the script would default to
+    # (decode_heavy / balanced / prefill_heavy) × single c, which is a
+    # *different* experiment.
     for MODEL in $MODELS; do
-        local short out
+        local short
         short=$(model_short "$MODEL")
-        out="outputs/adaptive_selector/${GPU_TAG}_${short}/.done"
-        if skip_if_exists "$out" "Table 4 $short"; then continue; fi
-        log "  Running EB+ traffic for $short ..."
-        GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) MODEL="$MODEL" \
-            bash run_adaptive_selector.sh "$MAX_GPUS" \
-            > "$LOGDIR/D_${short}.log" 2>&1
-        touch "$out"
-        log "  ✓ $short EB+ traffic done"
+        for c in 32 512 2048; do
+            local out="outputs/adaptive_selector/${GPU_TAG}_${short}_c${c}/.done"
+            if skip_if_exists "$out" "Table 4 $short c=$c"; then continue; fi
+            log "  Running EB+ traffic for $short c=$c ..."
+            GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) MODEL="$MODEL" \
+                SCENARIOS=table4 MAX_CONCURRENCY=$c \
+                OUTPUT_DIR="$PWD/outputs/adaptive_selector/${GPU_TAG}_${short}_c${c}" \
+                bash run_adaptive_selector.sh "$MAX_GPUS" \
+                > "$LOGDIR/D_${short}_c${c}.log" 2>&1
+            touch "$out"
+            log "  ✓ $short c=$c EB+ traffic done"
+        done
     done
 }
 

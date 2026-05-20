@@ -41,12 +41,15 @@ BASE_PORT=${BASE_PORT:-10100}
 SKIP_EXISTING=${SKIP_EXISTING:-1}
 
 # Per-workload (B, N) defaults — tuned for Qwen3-8B; override via env vars.
-# These BS values are the *initial* max-num-seqs caps; with auto-N enabled
-# below, the online controller dynamically shrinks N̂* ≤ BS as needed to
-# satisfy the OOM-tolerance constraint (Proposition prop:memory).
-TB_DECODE_HEAVY=${TB_DECODE_HEAVY:-16384};  BS_DECODE_HEAVY=${BS_DECODE_HEAVY:-2048}
-TB_BALANCED=${TB_BALANCED:-14336};          BS_BALANCED=${BS_BALANCED:-1024}
-TB_PREFILL_HEAVY=${TB_PREFILL_HEAVY:-18432}; BS_PREFILL_HEAVY=${BS_PREFILL_HEAVY:-512}
+# Paper Fig 3 caption: "Validation on H200, N = 1024." Defaults below pin
+# N=1024 across all three scenarios + AUTO_COMPUTE_N=0 below for paper-
+# caption-literal reproduction. (A previous default of BS_DECODE_HEAVY=2048
+# / BS_PREFILL_HEAVY=512 + AUTO_COMPUTE_N=1 produced numerically similar
+# results — within ~1% — but did not match the caption "N=1024" literally;
+# we now default to the caption-faithful setup.)
+TB_DECODE_HEAVY=${TB_DECODE_HEAVY:-16384};   BS_DECODE_HEAVY=${BS_DECODE_HEAVY:-1024}
+TB_BALANCED=${TB_BALANCED:-14336};           BS_BALANCED=${BS_BALANCED:-1024}
+TB_PREFILL_HEAVY=${TB_PREFILL_HEAVY:-18432}; BS_PREFILL_HEAVY=${BS_PREFILL_HEAVY:-1024}
 
 # Fixed-k sweep (paper Fig fig:validation, green curve).
 # For each scenario, also run EB at a grid of fixed thresholds k (θ*=k/N).
@@ -61,14 +64,13 @@ export VLLM_PD_PARAM_UPDATE_INTERVAL=${VLLM_PD_PARAM_UPDATE_INTERVAL:-100}
 export VLLM_PD_IFR_UPDATE_INTERVAL=${VLLM_PD_IFR_UPDATE_INTERVAL:-100}
 export VLLM_PD_IFR_WINDOW_SIZE=${VLLM_PD_IFR_WINDOW_SIZE:-500}
 export VLLM_PD_IFR_MIN_SAMPLES=${VLLM_PD_IFR_MIN_SAMPLES:-50}
-# Memory-safe online controller (Proposition prop:memory) is ENABLED by
-# default to match the paper's actual experimental setup: EB(k̂*) figures
-# (e.g. Fig. fig:validation) were produced with VLLM_PD_AUTO_COMPUTE_N=1,
-# with the BS values above acting as upper caps on the dynamically-computed
-# N̂*. The paper caption "N=1024" refers to the v1 baseline / fixed-k sweep;
-# EB(k̂*) uses the effective batch size min(N̂*, BS). Set =0 to disable
-# auto-shrink and force fixed N=BS for all schedulers.
-export VLLM_PD_AUTO_COMPUTE_N=${VLLM_PD_AUTO_COMPUTE_N:-1}
+# Memory-safe online controller (Proposition prop:memory). Default OFF to
+# match paper Fig 3 caption ("N = 1024") literally — every scheduler runs
+# at N=BS_*=1024 with no dynamic N̂* shrink. Set =1 to enable the auto-
+# compute path (will dynamically shrink N̂* ≤ BS to satisfy ε=0.01 OOM
+# bound); results are within ~1% of the AUTO=0 path on Qwen3-8B (empirically
+# verified 2026-05-20).
+export VLLM_PD_AUTO_COMPUTE_N=${VLLM_PD_AUTO_COMPUTE_N:-0}
 export VLLM_PD_OOM_TOLERANCE=${VLLM_PD_OOM_TOLERANCE:-0.01}
 
 init_experiment_env

@@ -75,7 +75,16 @@ MAX_CONCURRENCY=${MAX_CONCURRENCY:-2048}
 NUM_WARMUP_REQUESTS=${NUM_WARMUP_REQUESTS:-20}
 K_RATIO=${K_RATIO:-0.8}
 BASE_PORT=${BASE_PORT:-11000}
-CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-4000}
+# Workload-aware CUSTOM_OUTPUT_LEN (REPRODUCE.md §4.1 protocol).
+# Auto-detect from dataset basename; pre-existing env override still wins.
+case "${DATASET_NAME}" in
+    sharegpt*)   CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;
+    longbench*)  CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-20} ;;
+    wildchat*)   CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;
+    numina*)     CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-4000} ;;
+    *)           CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-4000} ;;
+esac
+IGNORE_EOS=${IGNORE_EOS:-true}
 ENABLE_THINKING=${ENABLE_THINKING:-true}  # controls Qwen3 thinking mode
 
 # Grid search parameters (SCENARIOS not needed since real datasets have fixed distributions)
