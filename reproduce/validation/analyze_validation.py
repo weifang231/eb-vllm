@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Analyse CFR online-controller validation results.
 
-Reads the *_stats.json files written by run_validation_cfr.sh, plus the
+Reads the *_stats.json files written by run_validation.sh, plus the
 benchmark JSONs, and reports per-workload:
   (i)   estimation accuracy of p̂_0 vs ground-truth p_0 = 1/E[O];
         estimation accuracy of μ̂_L vs ground-truth E[L];
@@ -59,44 +59,83 @@ def load_run(workload_dir: Path, sched: str) -> dict | None:
     return {"bench": b, "stats": s, "bench_path": bench, "stats_path": stats}
 
 
+def discover_schedulers(workload_dir: Path) -> list[str]:
+    """Return scheduler names in a stable order: v1, eb, fixed-k sweep."""
+    names = {p.stem.removeprefix("bench_") for p in workload_dir.glob("bench_*.json")}
+    ordered: list[str] = []
+    for primary in ("v1", "eb"):
+        if primary in names:
+            ordered.append(primary)
+    fixed = sorted(
+        (n for n in names if n.startswith("eb_fixed_k_")),
+        key=lambda n: int(n.removeprefix("eb_fixed_k_")),
+    )
+    ordered.extend(fixed)
+    return ordered
+
+
 def summarise(workload_dir: Path, scen: str, cfg: dict) -> list[dict]:
     rows = []
-    for sched in ("v1", "eb_khat"):
+    for sched in discover_schedulers(workload_dir):
         run = load_run(workload_dir, sched)
         if run is None:
             continue
         b = run["bench"]
         s = run["stats"]
-        cfr_hist = s.get("cfr_update_history") or []
-        last = cfr_hist[-1] if cfr_hist else {}
+        hist = s.get("update_history") or s.get("cfr_update_history") or []
+        last = hist[-1] if hist else {}
         pd_cfg = s.get("pd_config", {})
+        is_fixed_k = sched.startswith("eb_fixed_k_")
 
         # Ground truth
         gt_o = GROUND_TRUTH[scen]["output_len"]
         gt_l = GROUND_TRUTH[scen]["input_len"]
         gt_p_0 = 1.0 / gt_o
 
-        # Online estimates
+        # Online estimates (NaN for fixed-k — controller is disabled)
         out_lens = b.get("output_lens") or []
         in_lens = b.get("input_lens") or []
         realised_o = float(np.mean(out_lens)) if out_lens else 0.0
         realised_l = float(np.mean(in_lens)) if in_lens else 0.0
-        p_hat = last.get("p_0_estimate", 0.0)
-        mu_l_hat = last.get("mu_L_estimate", 0.0)
+        if is_fixed_k:
+            p_hat = float("nan")
+            mu_l_hat = float("nan")
+            theta_0 = float("nan")
+            k_hat = int(sched.removeprefix("eb_fixed_k_"))
+        else:
+            p_hat = last.get("p_0_estimate", 0.0)
+            mu_l_hat = last.get("mu_L_estimate", 0.0)
+            theta_0 = last.get("theta_0", 0.0)
+            k_hat = int(last.get("k_hat_int", pd_cfg.get("final_k_star", 0)))
 
-        # Throughput attainment
+        # Throughput attainment (only meaningful for the adaptive controller)
         n_hat = int(last.get("N_hat", pd_cfg.get("max_num_seqs", 0)))
-        theta_0 = last.get("theta_0", 0.0)
         cal = cfg.get("calibration_params", {})
-        tp_fluid = fluid_tp(
-            theta_0, gt_p_0, n_hat, gt_l,
-            float(cal.get("alpha_p", 0.0)),
-            float(cal.get("beta_p", 0.0)),
-            float(cal.get("alpha_d", 0.0)),
-            float(cal.get("beta_d", 0.0)),
-        )
+        if is_fixed_k or not isinstance(theta_0, (int, float)) or math.isnan(theta_0):
+            tp_fluid = float("nan")
+            attainment = float("nan")
+        else:
+            tp_fluid = fluid_tp(
+                theta_0, gt_p_0, n_hat, gt_l,
+                float(cal.get("alpha_p", 0.0)),
+                float(cal.get("beta_p", 0.0)),
+                float(cal.get("alpha_d", 0.0)),
+                float(cal.get("beta_d", 0.0)),
+            )
+            attainment = tp_real_attain(b, tp_fluid)
         tp_real = b.get("total_token_throughput", 0.0)
-        attainment = tp_real / tp_fluid if tp_fluid > 0 else 0.0
+        mean_tpot_ms = b.get("mean_tpot_ms", float("nan"))
+        # vLLM bench reports percentiles via separate top-level fields when
+        # --percentile-metrics tpot is set (default); newer versions also
+        # expose percentiles_tpot_ms as a list[(percentile, ms)].
+        p99_tpot_ms = b.get("p99_tpot_ms")
+        if p99_tpot_ms is None:
+            for pct, val in b.get("percentiles_tpot_ms") or []:
+                if abs(pct - 99) < 1e-6:
+                    p99_tpot_ms = val
+                    break
+        if p99_tpot_ms is None:
+            p99_tpot_ms = float("nan")
 
         # OOM rate
         completed = b.get("completed", 0)
@@ -114,22 +153,31 @@ def summarise(workload_dir: Path, scen: str, cfg: dict) -> list[dict]:
             "realised_E_O": realised_o,
             "p_hat_final": p_hat,
             "mu_L_hat_final": mu_l_hat,
-            "p_hat_relerr_pct": (abs(p_hat - gt_p_0) / gt_p_0 * 100) if gt_p_0 > 0 else 0.0,
-            "mu_L_hat_relerr_pct": (abs(mu_l_hat - gt_l) / gt_l * 100) if gt_l > 0 else 0.0,
+            "p_hat_relerr_pct": (abs(p_hat - gt_p_0) / gt_p_0 * 100)
+                if (gt_p_0 > 0 and not math.isnan(p_hat)) else float("nan"),
+            "mu_L_hat_relerr_pct": (abs(mu_l_hat - gt_l) / gt_l * 100)
+                if (gt_l > 0 and not math.isnan(mu_l_hat)) else float("nan"),
             "theta_0_final": theta_0,
-            "k_hat_final": last.get("k_hat_int", pd_cfg.get("final_k_star", 0)),
+            "k_hat_final": k_hat,
             "N_hat_final": n_hat,
             "tp_real": tp_real,
+            "mean_tpot_ms": mean_tpot_ms,
+            "p99_tpot_ms": p99_tpot_ms,
             "tp_fluid": tp_fluid,
-            "attainment_pct": attainment * 100,
+            "attainment_pct": attainment * 100 if not math.isnan(attainment) else float("nan"),
             "oom_events": oom,
             "completed": completed,
             "oom_rate": oom_rate,
             "oom_rate_pct": oom_rate * 100,
             "eps_target": eps,
-            "n_cfr_updates": len(cfr_hist),
+            "n_updates": len(hist),
         })
     return rows
+
+
+def tp_real_attain(b: dict, tp_fluid: float) -> float:
+    tp_real = b.get("total_token_throughput", 0.0)
+    return tp_real / tp_fluid if tp_fluid > 0 else 0.0
 
 
 def write_csv(rows: list[dict], path: Path) -> None:
@@ -145,10 +193,10 @@ def write_csv(rows: list[dict], path: Path) -> None:
 
 
 def write_latex(rows: list[dict], path: Path, eps: float) -> None:
-    eb_rows = [r for r in rows if r["scheduler"] == "eb_khat"]
+    eb_rows = [r for r in rows if r["scheduler"] == "eb"]
     eb_rows.sort(key=lambda r: ("decode_heavy", "balanced", "prefill_heavy").index(r["scenario"]))
     with open(path, "w") as f:
-        f.write("% Auto-generated by analyze_cfr_validation.py\n")
+        f.write("% Auto-generated by analyze_validation.py\n")
         f.write("\\begin{tabular}{lrrrrrrr}\n")
         f.write("\\toprule\n")
         f.write("Workload & $\\hat p_0/p_0$ (\\%) & $\\hat\\mu_L/\\mu_L$ (\\%) "
@@ -176,17 +224,21 @@ def maybe_plot_traces(workload_dir: Path, scen: str, cfg: dict) -> None:
         import matplotlib.pyplot as plt
     except ImportError:
         return
-    run = load_run(workload_dir, "eb_khat")
+    run = load_run(workload_dir, "eb")
     if run is None:
         return
-    cfr_hist = run["stats"].get("cfr_update_history") or []
-    if not cfr_hist:
+    hist = (
+        run["stats"].get("update_history")
+        or run["stats"].get("cfr_update_history")
+        or []
+    )
+    if not hist:
         return
-    times = [h["timestamp"] for h in cfr_hist]
-    p_hat = [h["p_0_estimate"] for h in cfr_hist]
-    mu_l_hat = [h["mu_L_estimate"] for h in cfr_hist]
-    k_hat = [h["k_hat_int"] for h in cfr_hist]
-    n_hat = [h["N_hat"] for h in cfr_hist]
+    times = [h["timestamp"] for h in hist]
+    p_hat = [h["p_0_estimate"] for h in hist]
+    mu_l_hat = [h["mu_L_estimate"] for h in hist]
+    k_hat = [h["k_hat_int"] for h in hist]
+    n_hat = [h["N_hat"] for h in hist]
     gt = GROUND_TRUTH[scen]
     plot_dir = workload_dir / "plots"
     plot_dir.mkdir(exist_ok=True)

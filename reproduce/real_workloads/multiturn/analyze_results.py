@@ -115,7 +115,7 @@ def collect_grid_results(exp_dir: Path) -> Dict:
             "tb_values": [...],
             "bs_values": [...],
             "results": {
-                (tb, bs): {"baseline": metrics, "pd_ratio": metrics, ...}
+                (tb, bs): {"v1": metrics, "eb_kratio": metrics, ...}
             }
         }
     """
@@ -150,7 +150,7 @@ def collect_grid_results(exp_dir: Path) -> Dict:
 
             # Dynamically detect all bench_*.json files
             for bench_file in bs_dir.glob("bench_*.json"):
-                # Extract scheduler name from filename: bench_pd_ifr_1.json -> pd_ifr_1
+                # Extract scheduler name from filename: bench_eb_1.json -> pd_ifr_1
                 scheduler = bench_file.stem[6:]  # strip "bench_" prefix
                 bench_result = load_bench_result(bench_file)
                 if bench_result:
@@ -192,9 +192,9 @@ def find_optimal_configs(data: Dict) -> Dict:
     return optimal
 
 
-def compute_improvement_grid(data: Dict, metric: str, pd_scheduler: str = "pd_ifr",
+def compute_improvement_grid(data: Dict, metric: str, eb_scheduler: str = "eb",
                              higher_better: bool = True) -> Tuple[np.ndarray, list, list]:
-    """Compute the PD-vs-baseline improvement grid.
+    """Compute the EB-vs-v1 improvement grid.
 
     Returns:
         (improvement_matrix, tb_values, bs_values)
@@ -209,14 +209,14 @@ def compute_improvement_grid(data: Dict, metric: str, pd_scheduler: str = "pd_if
         for j, bs in enumerate(bs_values):
             key = (tb, bs)
             if key in results:
-                baseline = results[key].get("baseline", {}).get(metric, 0)
-                pd = results[key].get(pd_scheduler, {}).get(metric, 0)
+                v1_val = results[key].get("v1", {}).get(metric, 0)
+                eb_val = results[key].get(eb_scheduler, {}).get(metric, 0)
 
-                if baseline > 0 and pd > 0:
+                if v1_val > 0 and eb_val > 0:
                     if higher_better:
-                        improvement = (pd - baseline) / baseline * 100
+                        improvement = (eb_val - v1_val) / v1_val * 100
                     else:
-                        improvement = (baseline - pd) / baseline * 100
+                        improvement = (v1_val - eb_val) / v1_val * 100
                     matrix[i, j] = improvement
 
     return matrix, tb_values, bs_values
@@ -236,7 +236,7 @@ def plot_heatmaps(data: Dict, output_dir: Path):
 
     # Detect available PD schedulers
     pd_schedulers = []
-    for key in ["pd_ifr", "pd_ratio", "pd"]:
+    for key in ["eb", "eb_kratio", "pd"]:
         for sched_results in data["results"].values():
             if key in sched_results:
                 pd_schedulers.append(key)
@@ -308,11 +308,10 @@ def plot_optimal_comparison(optimal: Dict, output_dir: Path):
 
     # Scheduler configuration: (key, color, label)
     schedulers = [
-        ("baseline", '#2ecc71', 'Baseline'),
-        ("pd_ratio", '#3498db', 'PD (ratio)'),
-        ("pd_ratio_auto", '#9b59b6', 'PD (ratio auto)'),
-        ("pd_ifr", '#1abc9c', 'PD (IFR)'),
-        ("pd", '#5dade2', 'PD (legacy)'),
+        ("v1",        '#2ecc71', 'v1'),
+        ("eb_kratio", '#3498db', 'EB (fixed θ*)'),
+        ("eb",        '#1abc9c', 'EB(k̂*)'),
+        ("ebplus",    '#9b59b6', 'EB+'),
     ]
 
     # Filter out schedulers with no data
@@ -343,14 +342,14 @@ def plot_optimal_comparison(optimal: Dict, output_dir: Path):
         width = 0.6 if len(values) <= 3 else 0.4
         bars = ax.bar(x, values, width=width, color=colors)
 
-        # Compute PD-vs-baseline improvement
-        baseline_val = optimal.get("baseline", {}).get("metrics", {}).get(metric, 0)
-        pd_ifr_val = optimal.get("pd_ifr", {}).get("metrics", {}).get(metric, 0)
-        if baseline_val > 0 and pd_ifr_val > 0:
+        # Compute EB-vs-v1 improvement
+        v1_val_opt = optimal.get("v1", {}).get("metrics", {}).get(metric, 0)
+        eb_val_opt = optimal.get("eb", {}).get("metrics", {}).get(metric, 0)
+        if v1_val > 0 and eb_val > 0:
             if higher_better:
-                improvement = (pd_ifr_val - baseline_val) / baseline_val * 100
+                improvement = (eb_val - v1_val) / v1_val * 100
             else:
-                improvement = (baseline_val - pd_ifr_val) / baseline_val * 100
+                improvement = (v1_val - eb_val) / v1_val * 100
             imp_str = f"PD(direct) vs Base: {improvement:+.1f}%"
         else:
             imp_str = ""
@@ -397,10 +396,9 @@ def generate_report(data: Dict, optimal: Dict) -> str:
     def get_display_name(key: str) -> str:
         """Convert a scheduler key to a display name."""
         name_map = {
-            "baseline": "Baseline",
-            "pd_ratio": "PD (ratio)",
-            "pd_ratio_auto": "PD (ratio auto)",
-            "pd_ifr": "PD (IFR)",
+            "v1": "Baseline",
+            "eb_kratio": "PD (ratio)",
+            "eb": "PD (IFR)",
             "pd": "PD (legacy)",
         }
         if key in name_map:
@@ -424,9 +422,9 @@ def generate_report(data: Dict, optimal: Dict) -> str:
         lines.append("")
 
         # Get optimal config for specific schedulers
-        baseline_opt = optimal.get("baseline", {})
-        pd_ifr_opt = optimal.get("pd_ifr", {})
-        pd_ratio_opt = optimal.get("pd_ratio", {})
+        baseline_opt = optimal.get("v1", {})
+        pd_ifr_opt = optimal.get("eb", {})
+        pd_ratio_opt = optimal.get("eb_kratio", {})
 
         # Compare key metrics
         header = f"{'Metric':<25}"
@@ -503,7 +501,7 @@ def generate_report(data: Dict, optimal: Dict) -> str:
     lines.append("=" * 80)
 
     # Tally winner (dynamically detect all schedulers starting with pd_)
-    baseline_tp = optimal.get("baseline", {}).get("metrics", {}).get("throughput", 0)
+    baseline_tp = optimal.get("v1", {}).get("metrics", {}).get("throughput", 0)
     best_pd_tp = 0
     best_pd_name = None
     for v, opt_data in optimal.items():

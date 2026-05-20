@@ -23,8 +23,8 @@ new knobs.
 | Var | Default | Type | Audience | Read site | Notes |
 |---|---|---|---|---|---|
 | `VLLM_USE_PD_SCHEDULER` | `0` | `0/1` | user | `scheduler.py:220` | Legacy boolean toggle. Superseded by `VLLM_PD_SCHEDULER_MODE` (which wins if both set). |
-| `VLLM_PD_SCHEDULER_MODE` | `""` | `cp \| eb \| auto \| ""` | user | `scheduler.py:217` | Primary mode selector. `cp`=MB (vLLM default), `eb`=EB(k̂\*), `auto`=EB⁺. Empty falls back to the legacy flag. |
-| `VLLM_PD_AUTO_COLD_START_MODE` | `cp` | `cp \| eb` | advanced | `scheduler.py:477` | Which mode EB⁺ runs in until it has enough IFR samples to fire the first crossover decision. |
+| `VLLM_PD_SCHEDULER_MODE` | `""` | `v1 \| eb \| auto \| ""` | user | `scheduler.py:232` | Primary mode selector. `v1`=vLLM v1 mixed-batching (default), `eb`=pure EB(k̂\*), `auto`=EB⁺ (online v1↔eb crossover). Empty falls back to the legacy flag. |
+| `VLLM_PD_AUTO_COLD_START_MODE` | `v1` | `v1 \| eb` | advanced | `scheduler.py:545` | Which sub-scheduler EB⁺ runs in until it has enough IFR samples to fire the first crossover decision. |
 
 ## 2. Calibration (cost model — α/β coefficients)
 
@@ -35,7 +35,6 @@ new knobs.
 | `VLLM_PD_BETA_P`  | — | float | advanced | `scheduler.py:267` | Override β\_p (prefill slope, per-token). |
 | `VLLM_PD_ALPHA_D` | — | float | advanced | `scheduler.py:268` | Override α\_d (decode constant). |
 | `VLLM_PD_BETA_D`  | — | float | advanced | `scheduler.py:269` | Override β\_d (decode slope, per-batched-token). |
-| `VLLM_PD_ALPHA_CP` | `α_p` | float | advanced | `scheduler.py:489` | EB⁺ continuous-prefill constant. Paper approximates α\_p ≈ α\_d ≈ α\_CP; override if you measure α\_CP separately. |
 
 ## 3. EB(k̂\*) — threshold (θ) selection
 
@@ -70,11 +69,11 @@ diagnostic Δ(N) compares the amortised cost of one MB step vs. one EB step.
 
 | Var | Default | Type | Audience | Read site | Notes |
 |---|---|---|---|---|---|
-| `VLLM_PD_CP_COST_A` | `0` | float | paper | `scheduler.py:480` | CP-cost model coefficient `a` in `f(r) = a·r² + b·r + c`. Measured from a one-time kernel sweep per (model, GPU). |
-| `VLLM_PD_CP_COST_B` | `0` | float | paper | `scheduler.py:481` | Coefficient `b`. |
-| `VLLM_PD_CP_COST_C` | `0` | float | paper | `scheduler.py:482` | Coefficient `c`. With all three at 0 the LHS of the crossover collapses to 0, making the decision purely amortised-overhead driven (conservative but still informative — see `reproduce/eb_plus/traffic/run_adaptive_selector_cfr.sh:21-29`). |
-| `VLLM_PD_BETA_MB_E` | `β_EB^w` | float | advanced | `scheduler.py:887` | Effective MB per-token cost in the crossover formula. Defaults to the EB-side workload-weighted β (best available proxy). |
-| `VLLM_PD_ALPHA_MB` | `α_p` | float | advanced | `scheduler.py:888` | Per-step MB constant. Defaults to α\_p (paper approximation). |
+| `VLLM_PD_MB_COST_A` | `0` | float | paper | `scheduler.py:552` | β\_MB^e(r) polynomial coefficient `a` in `f(r) = a + b·r + c·r²` (paper Eq. 11). Measured from a one-time kernel sweep per (model, GPU). |
+| `VLLM_PD_MB_COST_B` | `0` | float | paper | `scheduler.py:553` | Coefficient `b`. |
+| `VLLM_PD_MB_COST_C` | `0` | float | paper | `scheduler.py:554` | Coefficient `c`. With all three at 0 the LHS of the crossover collapses to 0, making the decision purely amortised-overhead driven (conservative but still informative — see `reproduce/eb_plus/traffic/run_adaptive_selector.sh:21-29`). |
+| `VLLM_PD_BETA_MB_E` | `β_EB^w` | float | advanced | `scheduler.py:977` | Constant proxy for β\_MB^e in the diagnostic Δ(N) formula. Defaults to the EB-side workload-weighted β (best available proxy when no calibration). Distinct from the polynomial above. |
+| `VLLM_PD_ALPHA_MB` | `α_p` | float | advanced | `scheduler.py:562 + 978` | α\_MB in paper Eq. 11/13 (per-step MB constant). Read at __init__ (the actual mode-switch decision) AND in the diagnostic Δ(N). Defaults to α\_p (paper approximation α\_p ≈ α\_d ≈ α\_MB). |
 | `VLLM_PD_MODE_SWITCH_DELTA` | `0.0001` | float | advanced | `scheduler.py:494` | Hysteresis band around the crossover. \|Δ(N)\| must exceed this to flip. Larger → more sticky. |
 | `VLLM_PD_MODE_COOLDOWN` | `3` | int | advanced | `scheduler.py:496` | Min N-update ticks between two flips. |
 
@@ -89,7 +88,7 @@ diagnostic Δ(N) compares the amortised cost of one MB step vs. one EB step.
 
 | Var | Default | Type | Audience | Read site | Notes |
 |---|---|---|---|---|---|
-| `VLLM_COLLECT_SCHEDULE_STATS` | `0` | `0/1` | user | `scheduler.py:532` | Collect per-step scheduler stats (mode-switch history, θ trace, N trace, IFR samples). Required for the `*_stats.json` files that `reproduce/eb_plus/traffic/analyze_cfr_selector.py` reads. |
+| `VLLM_COLLECT_SCHEDULE_STATS` | `0` | `0/1` | user | `scheduler.py:532` | Collect per-step scheduler stats (mode-switch history, θ trace, N trace, IFR samples). Required for the `*_stats.json` files that `reproduce/eb_plus/traffic/analyze_selector.py` reads. |
 | `VLLM_SCHEDULE_STATS_FILE` | `schedule_stats.json` | path | user | `scheduler.py:536`, `:3606` | Where to write the stats JSON. The reproduce scripts set this per-run. |
 
 ---
@@ -109,7 +108,7 @@ vllm serve ... --max-num-seqs <N> --max-num-batched-tokens <B>
 # EB+ — paper §4.4 (recommended for unknown traffic)
 VLLM_PD_SCHEDULER_MODE=auto \
 VLLM_PD_K_MODE=ifr \
-VLLM_PD_CP_COST_A=<a> VLLM_PD_CP_COST_B=<b> VLLM_PD_CP_COST_C=<c> \
+VLLM_PD_MB_COST_A=<a> VLLM_PD_MB_COST_B=<b> VLLM_PD_MB_COST_C=<c> \
 VLLM_PD_CALIBRATION_FILE=... \
 vllm serve ...
 ```
@@ -118,7 +117,7 @@ The `CP_COST_*` coefficients come from a one-time kernel sweep on the target
 (model, GPU). Without them EB⁺ still runs but the crossover decision relies
 entirely on the amortised-overhead RHS — typically conservative (stays in MB
 longer than optimal). See the header of
-[`reproduce/eb_plus/traffic/run_adaptive_selector_cfr.sh`](eb_plus/traffic/run_adaptive_selector_cfr.sh)
+[`reproduce/eb_plus/traffic/run_adaptive_selector.sh`](eb_plus/traffic/run_adaptive_selector.sh)
 for details.
 
 ## Future work

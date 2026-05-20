@@ -46,7 +46,7 @@ python -m vllm.v1.core.sched.calibration --model Qwen/Qwen3-8B \
 # 5. Run one paper artifact (example: Table 2 Qwen3-8B ShareGPT)
 cd reproduce/real_workloads
 VLLM_PD_CALIBRATION_FILE=$PWD/../calibration/pd_calibration_Qwen3-8B_RTXPRO6000.json \
-GPUS=0,1 SCHEDULERS="baseline pd_ifr" MODEL=Qwen/Qwen3-8B \
+GPUS=0,1 SCHEDULERS="v1 eb" MODEL=Qwen/Qwen3-8B \
     bash run_optimal_only.sh ../outputs/sharegpt_prompts.jsonl 2
 
 # 6. Analyze / plot
@@ -75,9 +75,9 @@ workload):
 **EB⁺ runs (Table 4, Table 5)** additionally need the offline-profiled
 mixed-batch cost coefficients (see Appendix `app:eb-plus-calibration`):
 ```bash
-export VLLM_PD_CP_COST_A=2.494e-05   # H200 Qwen3-8B; recalibrate per (model, GPU)
-export VLLM_PD_CP_COST_B=5.193e-05
-export VLLM_PD_CP_COST_C=1.478e-05
+export VLLM_PD_MB_COST_A=2.494e-05   # H200 Qwen3-8B; recalibrate per (model, GPU)
+export VLLM_PD_MB_COST_B=5.193e-05
+export VLLM_PD_MB_COST_C=1.478e-05
 export VLLM_PD_MODE_SWITCH_DELTA=1e-5
 ```
 
@@ -101,7 +101,7 @@ For end-to-end recipes with expected runtimes, see [`REPRODUCE.md`](REPRODUCE.md
 
 ## Shared infrastructure
 
-- [`common/`](common/) — shared bash helpers (`common.sh`, `common_cfr.sh`) and
+- [`common/`](common/) — shared bash helpers (`common.sh`, `common_eb.sh`) and
   Python utilities (`dataset_utils.py`, `export_dataset.py`).
 - [`calibration/`](calibration/) — cost-model calibration JSONs (one sample
   shipped; reviewers regenerate per (model, GPU) as needed).
@@ -146,13 +146,13 @@ are now resolved.
 
 ### 2. ✅ Synthetic workloads use ±50% UNIFORM jitter, not CFR/geometric (patched)
 Paper §4.1 spec: "Synthetic workloads fix mean input/output token counts
-(with ±50% uniform jitter)". `run_grid_search_cfr.sh` and
-`run_adaptive_selector_cfr.sh` previously hardcoded
+(with ±50% uniform jitter)". `run_grid_search.sh` and
+`run_adaptive_selector.sh` previously hardcoded
 `--dataset-name geometric_random` — now patched to default to `random` (uniform)
 via env-override `DATASET_NAME=${DATASET_NAME:-random}`. To restore the old CFR
 behavior explicitly:
 ```bash
-DATASET_NAME=geometric_random bash run_grid_search_cfr.sh ...
+DATASET_NAME=geometric_random bash run_grid_search.sh ...
 ```
 Using `geometric_random` produces +5-15pp larger EB improvements on synthetic
 than paper because the heavier tail of geometric output lengths favors

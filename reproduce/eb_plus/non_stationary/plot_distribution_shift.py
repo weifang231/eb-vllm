@@ -2,7 +2,7 @@
 """
 Plot distribution shift experiment results.
 
-Reads schedule stats from pd_ifr and pd_ratio runs, and generates:
+Reads schedule stats from eb and eb_kratio runs, and generates:
   - Panel 1: θ* (k_ratio) over iteration — shows IFR adaptation vs fixed ratio
   - Panel 2: Sliding-window throughput (tokens/s) over time
   - Panel 3: Preemption count (memory safety indicator)
@@ -28,13 +28,13 @@ import matplotlib.pyplot as plt
 
 
 SCHEDULER_DISPLAY = {
-    "pd_ifr": "EB(k̂*) (adaptive)",
-    "pd_ratio": r"EB(k̂*) (fixed $\theta^{*}\!=\!0.8$)",
+    "eb": "EB(k̂*) (adaptive)",
+    "eb_kratio": r"EB(k̂*) (fixed $\theta^{*}\!=\!0.8$)",
 }
 
 SCHEDULER_COLORS = {
-    "pd_ifr": "#2A6F97",
-    "pd_ratio": "#B23A3A",
+    "eb": "#2A6F97",
+    "eb_kratio": "#B23A3A",
 }
 
 PHASE_COLORS = ["#E8F4FD", "#FFF3E0", "#FFEBEE", "#E8F5E9", "#F3E5F5"]
@@ -190,7 +190,7 @@ def plot_distribution_shift(
     num_phases = config.get("num_phases", 2)
     phases = config.get("phases", [])
 
-    schedulers = ["pd_ifr", "pd_ratio"]
+    schedulers = ["eb", "eb_kratio"]
     all_stats = {}
     for sched in schedulers:
         stats_path = exp_dir / f"{sched}_stats.json"
@@ -345,7 +345,7 @@ def print_summary(exp_dir: Path) -> None:
     num_phases = config.get("num_phases", 2)
     phases = config.get("phases", [])
 
-    for sched in ["pd_ifr", "pd_ratio"]:
+    for sched in ["eb", "eb_kratio"]:
         stats_path = exp_dir / f"{sched}_stats.json"
         if not stats_path.exists():
             continue

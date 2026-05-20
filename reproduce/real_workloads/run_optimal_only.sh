@@ -5,17 +5,17 @@
 # which sweeps a 5x6=30 (B, N) grid per scheduler.
 #
 # (B, N) values are taken from Appendix Table tab:optimal-config-h200 (H200,
-# Qwen3-8B) of the camera-ready paper.  The mapping between paper schedulers
-# and the script's --VLLM_PD_K_MODE choices is:
-#     baseline  <-  v1   (vLLM default; VLLM_USE_PD_SCHEDULER=0)
-#     pd_ifr    <-  EB(k_hat^*)  (adaptive theta*, k_mode=ifr)
-#     pd_ratio  <-  fixed-k EB ablation only (k_mode=ratio, fixed theta=K_RATIO);
-#                   NOT a reproduction of the paper's v0 scheduler.  Paper v0
-#                   is implemented on the older vLLM v0 codebase in a separate
-#                   repo; pd_ratio numbers from this script should not be
-#                   reported as "v0".
+# Qwen3-8B) of the camera-ready paper.  Scheduler names match canonical
+# common_eb.sh nomenclature:
+#     v1         vLLM default mixed-batching (VLLM_USE_PD_SCHEDULER=0)
+#     eb         EB(k̂*) adaptive controller (K_MODE=ifr)
+#     eb_kratio  fixed-θ EB ablation (K_MODE=ratio, fixed θ=K_RATIO);
+#                NOT a reproduction of the paper's v0 scheduler.  Paper v0
+#                is implemented on the older vLLM v0 codebase in a separate
+#                repo; eb_kratio numbers from this script should not be
+#                reported as "v0".
 #
-# pd_ratio reuses pd_ifr's (B, N) since both are EB variants and (B, N) is
+# eb_kratio reuses eb's (B, N) since both are EB variants and (B, N) is
 # robust within EB.
 #
 # Usage:
@@ -32,9 +32,9 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/../common/common.sh"
-# common_cfr.sh provides resolve_calibration + detect_gpu_name (per-GPU
+# common_eb.sh provides resolve_calibration + detect_gpu_name (per-GPU
 # calibration lookup) which we want even for non-CFR runs.
-source "${SCRIPT_DIR}/../common/common_cfr.sh"
+source "${SCRIPT_DIR}/../common/common_eb.sh"
 
 WORKER_PIDS=()
 cleanup() {
@@ -90,13 +90,13 @@ fi
 #   MODEL_TAG  derived from $MODEL_SHORT below (e.g. Qwen3-8B / Qwen3-30B-A3B).
 #
 # Scheduler -> paper-vocab mapping (see evaluation.tex §4.3.1):
-#   baseline = v1 (vLLM default mixed batching)
-#   pd_ifr   = EB(k_hat^*) (adaptive threshold from this paper)
-#   pd_ratio = fixed-k EB ablation (this fork's own EB-with-fixed-theta path,
-#              NOT a reproduction of the paper's v0 scheduler — paper v0 is
-#              implemented on the older vLLM v0 codebase in a separate repo
-#              and its numbers should be sourced from there, not from this
-#              file's pd_ratio runs).
+#   v1        = v1 (vLLM default mixed batching)
+#   eb        = EB(k̂*) (adaptive threshold from this paper)
+#   eb_kratio = fixed-k EB ablation (this fork's own EB-with-fixed-theta path,
+#               NOT a reproduction of the paper's v0 scheduler — paper v0 is
+#               implemented on the older vLLM v0 codebase in a separate repo
+#               and its numbers should be sourced from there, not from this
+#               file's eb_kratio runs).
 # ---------------------------------------------------------------------------
 lookup_bn() {
     local workload=$1 scheduler=$2
@@ -104,91 +104,91 @@ lookup_bn() {
     local model_key="${MODEL_TAG:-Qwen3-8B}"
     case "${gpu_key}:${model_key}:${workload}:${scheduler}" in
         # ===== H200, Qwen3-8B =====
-        H200:Qwen3-8B:sharegpt:baseline)        echo "10240,1024" ;;  # v1
-        H200:Qwen3-8B:sharegpt:pd_ratio)        echo "18432,2048" ;;
-        H200:Qwen3-8B:sharegpt:pd_ifr)          echo "16384,1536" ;;  # EB(k_hat^*)
+        H200:Qwen3-8B:sharegpt:v1)        echo "10240,1024" ;;  # v1
+        H200:Qwen3-8B:sharegpt:eb_kratio)        echo "18432,2048" ;;
+        H200:Qwen3-8B:sharegpt:eb)          echo "16384,1536" ;;  # EB(k_hat^*)
 
-        H200:Qwen3-8B:longbench:baseline)       echo "14336,256"  ;;  # v1
-        H200:Qwen3-8B:longbench:pd_ratio)       echo "18432,256"  ;;
-        H200:Qwen3-8B:longbench:pd_ifr)         echo "14336,2048" ;;  # EB(k_hat^*)
+        H200:Qwen3-8B:longbench:v1)       echo "14336,256"  ;;  # v1
+        H200:Qwen3-8B:longbench:eb_kratio)       echo "18432,256"  ;;
+        H200:Qwen3-8B:longbench:eb)         echo "14336,2048" ;;  # EB(k_hat^*)
 
-        H200:Qwen3-8B:wildchat:baseline)        echo "4096,2048"  ;;  # v1
-        H200:Qwen3-8B:wildchat:pd_ratio)        echo "18432,1536" ;;
-        H200:Qwen3-8B:wildchat:pd_ifr)          echo "16384,1024" ;;  # EB(k_hat^*)
+        H200:Qwen3-8B:wildchat:v1)        echo "4096,2048"  ;;  # v1
+        H200:Qwen3-8B:wildchat:eb_kratio)        echo "18432,1536" ;;
+        H200:Qwen3-8B:wildchat:eb)          echo "16384,1024" ;;  # EB(k_hat^*)
 
-        H200:Qwen3-8B:numina_math:baseline)     echo "14336,256"  ;;  # v1
-        H200:Qwen3-8B:numina_math:pd_ratio)     echo "10240,256"  ;;
-        H200:Qwen3-8B:numina_math:pd_ifr)       echo "18432,256"  ;;  # EB(k_hat^*)
+        H200:Qwen3-8B:numina_math:v1)     echo "14336,256"  ;;  # v1
+        H200:Qwen3-8B:numina_math:eb_kratio)     echo "10240,256"  ;;
+        H200:Qwen3-8B:numina_math:eb)       echo "18432,256"  ;;  # EB(k_hat^*)
 
         # ===== H200, Qwen3-30B-A3B (paper Appendix tab:optimal-config-h200) =====
-        H200:Qwen3-30B-A3B:sharegpt:baseline)     echo "8192,2048"  ;;  # v1
-        H200:Qwen3-30B-A3B:sharegpt:pd_ratio)     echo "14336,1536" ;;
-        H200:Qwen3-30B-A3B:sharegpt:pd_ifr)       echo "4096,1536"  ;;  # EB(k_hat^*)
+        H200:Qwen3-30B-A3B:sharegpt:v1)     echo "8192,2048"  ;;  # v1
+        H200:Qwen3-30B-A3B:sharegpt:eb_kratio)     echo "14336,1536" ;;
+        H200:Qwen3-30B-A3B:sharegpt:eb)       echo "4096,1536"  ;;  # EB(k_hat^*)
 
-        H200:Qwen3-30B-A3B:longbench:baseline)    echo "14336,2048" ;;  # v1
-        H200:Qwen3-30B-A3B:longbench:pd_ratio)    echo "18432,256"  ;;
-        H200:Qwen3-30B-A3B:longbench:pd_ifr)      echo "16384,1024" ;;  # EB(k_hat^*)
+        H200:Qwen3-30B-A3B:longbench:v1)    echo "14336,2048" ;;  # v1
+        H200:Qwen3-30B-A3B:longbench:eb_kratio)    echo "18432,256"  ;;
+        H200:Qwen3-30B-A3B:longbench:eb)      echo "16384,1024" ;;  # EB(k_hat^*)
 
-        H200:Qwen3-30B-A3B:wildchat:baseline)     echo "4096,1536"  ;;  # v1
-        H200:Qwen3-30B-A3B:wildchat:pd_ratio)     echo "16384,1024" ;;
-        H200:Qwen3-30B-A3B:wildchat:pd_ifr)       echo "14336,1024" ;;  # EB(k_hat^*)
+        H200:Qwen3-30B-A3B:wildchat:v1)     echo "4096,1536"  ;;  # v1
+        H200:Qwen3-30B-A3B:wildchat:eb_kratio)     echo "16384,1024" ;;
+        H200:Qwen3-30B-A3B:wildchat:eb)       echo "14336,1024" ;;  # EB(k_hat^*)
 
-        H200:Qwen3-30B-A3B:numina_math:baseline)  echo "8192,512"   ;;  # v1
-        H200:Qwen3-30B-A3B:numina_math:pd_ratio)  echo "10240,1024" ;;
-        H200:Qwen3-30B-A3B:numina_math:pd_ifr)    echo "10240,512"  ;;  # EB(k_hat^*)
+        H200:Qwen3-30B-A3B:numina_math:v1)  echo "8192,512"   ;;  # v1
+        H200:Qwen3-30B-A3B:numina_math:eb_kratio)  echo "10240,1024" ;;
+        H200:Qwen3-30B-A3B:numina_math:eb)    echo "10240,512"  ;;  # EB(k_hat^*)
 
         # ===== RTX PRO 6000, Qwen3-8B =====
-        RTXPRO6000:Qwen3-8B:sharegpt:baseline)        echo "16384,1536" ;;  # v1
-        RTXPRO6000:Qwen3-8B:sharegpt:pd_ratio)        echo "14336,1536" ;;
-        RTXPRO6000:Qwen3-8B:sharegpt:pd_ifr)          echo "14336,1536" ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-8B:sharegpt:v1)        echo "16384,1536" ;;  # v1
+        RTXPRO6000:Qwen3-8B:sharegpt:eb_kratio)        echo "14336,1536" ;;
+        RTXPRO6000:Qwen3-8B:sharegpt:eb)          echo "14336,1536" ;;  # EB(k_hat^*)
 
-        RTXPRO6000:Qwen3-8B:longbench:baseline)       echo "10240,1024" ;;  # v1
-        RTXPRO6000:Qwen3-8B:longbench:pd_ratio)       echo "16384,512"  ;;
-        RTXPRO6000:Qwen3-8B:longbench:pd_ifr)         echo "16384,512"  ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-8B:longbench:v1)       echo "10240,1024" ;;  # v1
+        RTXPRO6000:Qwen3-8B:longbench:eb_kratio)       echo "16384,512"  ;;
+        RTXPRO6000:Qwen3-8B:longbench:eb)         echo "16384,512"  ;;  # EB(k_hat^*)
 
-        RTXPRO6000:Qwen3-8B:wildchat:baseline)        echo "18432,1024" ;;  # v1
-        RTXPRO6000:Qwen3-8B:wildchat:pd_ratio)        echo "18432,1024" ;;
-        RTXPRO6000:Qwen3-8B:wildchat:pd_ifr)          echo "10240,1024" ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-8B:wildchat:v1)        echo "18432,1024" ;;  # v1
+        RTXPRO6000:Qwen3-8B:wildchat:eb_kratio)        echo "18432,1024" ;;
+        RTXPRO6000:Qwen3-8B:wildchat:eb)          echo "10240,1024" ;;  # EB(k_hat^*)
 
-        RTXPRO6000:Qwen3-8B:numina_math:baseline)     echo "14336,256"  ;;  # v1
-        RTXPRO6000:Qwen3-8B:numina_math:pd_ratio)     echo "8192,256"   ;;
-        RTXPRO6000:Qwen3-8B:numina_math:pd_ifr)       echo "4096,256"   ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-8B:numina_math:v1)     echo "14336,256"  ;;  # v1
+        RTXPRO6000:Qwen3-8B:numina_math:eb_kratio)     echo "8192,256"   ;;
+        RTXPRO6000:Qwen3-8B:numina_math:eb)       echo "4096,256"   ;;  # EB(k_hat^*)
 
         # ===== RTX PRO 6000, Qwen3-30B-A3B (paper Appendix tab:optimal-config-a6000) =====
-        RTXPRO6000:Qwen3-30B-A3B:sharegpt:baseline)     echo "8192,1536"  ;;  # v1
-        RTXPRO6000:Qwen3-30B-A3B:sharegpt:pd_ratio)     echo "4096,1024"  ;;
-        RTXPRO6000:Qwen3-30B-A3B:sharegpt:pd_ifr)       echo "10240,1024" ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-30B-A3B:sharegpt:v1)     echo "8192,1536"  ;;  # v1
+        RTXPRO6000:Qwen3-30B-A3B:sharegpt:eb_kratio)     echo "4096,1024"  ;;
+        RTXPRO6000:Qwen3-30B-A3B:sharegpt:eb)       echo "10240,1024" ;;  # EB(k_hat^*)
 
-        RTXPRO6000:Qwen3-30B-A3B:longbench:baseline)    echo "14336,2048" ;;  # v1
-        RTXPRO6000:Qwen3-30B-A3B:longbench:pd_ratio)    echo "14336,256"  ;;
-        RTXPRO6000:Qwen3-30B-A3B:longbench:pd_ifr)      echo "16384,256"  ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-30B-A3B:longbench:v1)    echo "14336,2048" ;;  # v1
+        RTXPRO6000:Qwen3-30B-A3B:longbench:eb_kratio)    echo "14336,256"  ;;
+        RTXPRO6000:Qwen3-30B-A3B:longbench:eb)      echo "16384,256"  ;;  # EB(k_hat^*)
 
-        RTXPRO6000:Qwen3-30B-A3B:wildchat:baseline)     echo "14336,1024" ;;  # v1
-        RTXPRO6000:Qwen3-30B-A3B:wildchat:pd_ratio)     echo "10240,512"  ;;
-        RTXPRO6000:Qwen3-30B-A3B:wildchat:pd_ifr)       echo "18432,512"  ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-30B-A3B:wildchat:v1)     echo "14336,1024" ;;  # v1
+        RTXPRO6000:Qwen3-30B-A3B:wildchat:eb_kratio)     echo "10240,512"  ;;
+        RTXPRO6000:Qwen3-30B-A3B:wildchat:eb)       echo "18432,512"  ;;  # EB(k_hat^*)
 
-        RTXPRO6000:Qwen3-30B-A3B:numina_math:baseline)  echo "14336,256"  ;;  # v1
-        RTXPRO6000:Qwen3-30B-A3B:numina_math:pd_ratio)  echo "10240,512"  ;;
-        RTXPRO6000:Qwen3-30B-A3B:numina_math:pd_ifr)    echo "16384,256"  ;;  # EB(k_hat^*)
+        RTXPRO6000:Qwen3-30B-A3B:numina_math:v1)  echo "14336,256"  ;;  # v1
+        RTXPRO6000:Qwen3-30B-A3B:numina_math:eb_kratio)  echo "10240,512"  ;;
+        RTXPRO6000:Qwen3-30B-A3B:numina_math:eb)    echo "16384,256"  ;;  # EB(k_hat^*)
 
         # ===== H200, cross-model (paper §4.5.2 Figure 7 — paper uses RTX PRO 6000,
         # but we report H200 numbers using Qwen3-8B's (B, N) as proxy since paper
         # Figure 7 doesn't publish per-model H200 optima for these dense 7-8B models).
-        H200:Llama-3.1-8B-Instruct:sharegpt:baseline)        echo "10240,1024" ;;
-        H200:Llama-3.1-8B-Instruct:sharegpt:pd_ratio)        echo "18432,2048" ;;
-        H200:Llama-3.1-8B-Instruct:sharegpt:pd_ifr)          echo "16384,1536" ;;
+        H200:Llama-3.1-8B-Instruct:sharegpt:v1)        echo "10240,1024" ;;
+        H200:Llama-3.1-8B-Instruct:sharegpt:eb_kratio)        echo "18432,2048" ;;
+        H200:Llama-3.1-8B-Instruct:sharegpt:eb)          echo "16384,1536" ;;
 
-        H200:Mathstral-7B-v0.1:sharegpt:baseline)            echo "10240,1024" ;;
-        H200:Mathstral-7B-v0.1:sharegpt:pd_ratio)            echo "18432,2048" ;;
-        H200:Mathstral-7B-v0.1:sharegpt:pd_ifr)              echo "16384,1536" ;;
+        H200:Mathstral-7B-v0.1:sharegpt:v1)            echo "10240,1024" ;;
+        H200:Mathstral-7B-v0.1:sharegpt:eb_kratio)            echo "18432,2048" ;;
+        H200:Mathstral-7B-v0.1:sharegpt:eb)              echo "16384,1536" ;;
 
-        H200:Qwen2.5-Coder-7B:sharegpt:baseline)             echo "10240,1024" ;;
-        H200:Qwen2.5-Coder-7B:sharegpt:pd_ratio)             echo "18432,2048" ;;
-        H200:Qwen2.5-Coder-7B:sharegpt:pd_ifr)               echo "16384,1536" ;;
+        H200:Qwen2.5-Coder-7B:sharegpt:v1)             echo "10240,1024" ;;
+        H200:Qwen2.5-Coder-7B:sharegpt:eb_kratio)             echo "18432,2048" ;;
+        H200:Qwen2.5-Coder-7B:sharegpt:eb)               echo "16384,1536" ;;
 
-        H200:DeepSeek-R1-Distill-Qwen-7B:sharegpt:baseline)  echo "10240,1024" ;;
-        H200:DeepSeek-R1-Distill-Qwen-7B:sharegpt:pd_ratio)  echo "18432,2048" ;;
-        H200:DeepSeek-R1-Distill-Qwen-7B:sharegpt:pd_ifr)    echo "16384,1536" ;;
+        H200:DeepSeek-R1-Distill-Qwen-7B:sharegpt:v1)  echo "10240,1024" ;;
+        H200:DeepSeek-R1-Distill-Qwen-7B:sharegpt:eb_kratio)  echo "18432,2048" ;;
+        H200:DeepSeek-R1-Distill-Qwen-7B:sharegpt:eb)    echo "16384,1536" ;;
 
         *)
             echo "Error: no (B,N) entry for GPU=$gpu_key model=$model_key workload=$workload scheduler=$scheduler" >&2
@@ -212,7 +212,7 @@ BASE_PORT=${BASE_PORT:-11000}
 CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-4000}
 ENABLE_THINKING=${ENABLE_THINKING:-true}
 
-# Hardware calibration file (required by pd_ratio / pd_ifr). Auto-resolve
+# Hardware calibration file (required by eb_kratio / eb). Auto-resolve
 # the per-GPU file via the common helper used by §4.2 / §4.4 scripts.
 detect_gpu_name
 resolve_calibration "$MODEL"
@@ -229,12 +229,12 @@ mkdir -p "$OUTPUT_DIR"
 init_experiment_env
 select_gpus "$MAX_GPUS"
 
-# pd_ratio (the script's fixed-theta* EB ablation; k_mode=ratio) is skipped
-# by default because this fork releases only v1 vs EB(k_hat^*).  Paper Table
+# eb_kratio (the script's fixed-θ* EB ablation; K_MODE=ratio) is skipped
+# by default because this fork releases only v1 vs EB(k̂*).  Paper Table
 # v0 numbers were obtained on a separate vLLM v0 codebase and are NOT
-# reproduced by pd_ratio here.  Add pd_ratio back as an ablation only via:
-#     SCHEDULERS="baseline pd_ratio pd_ifr" ./run_optimal_only.sh ...
-SCHEDULERS=${SCHEDULERS:-"baseline pd_ifr"}
+# reproduced by eb_kratio here.  Add eb_kratio back as an ablation only via:
+#     SCHEDULERS="v1 eb_kratio eb" ./run_optimal_only.sh ...
+SCHEDULERS=${SCHEDULERS:-"v1 eb"}
 
 echo "========================================"
 echo "Optimal-config-only run (no grid search)"
@@ -312,20 +312,17 @@ run_experiment() {
     export VLLM_COLLECT_SCHEDULE_STATS=1
 
     case "$scheduler" in
-        baseline)
+        v1)
             export VLLM_USE_PD_SCHEDULER=0
-            unset VLLM_PD_K_MODE VLLM_PD_K_STAR VLLM_PD_K_RATIO
             ;;
-        pd_ratio)
+        eb_kratio)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=ratio
             export VLLM_PD_K_RATIO=$K_RATIO
-            unset VLLM_PD_K_STAR
             ;;
-        pd_ifr)
+        eb)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=ifr
-            unset VLLM_PD_K_RATIO VLLM_PD_K_STAR
             ;;
     esac
 

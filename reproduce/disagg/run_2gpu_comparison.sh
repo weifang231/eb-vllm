@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 2-GPU fair comparison: baseline(DP=2) vs pd_auto(DP=2) vs disagg(P/D separation)
+# 2-GPU fair comparison: v1(DP=2) vs ebplus(DP=2) vs disagg(P/D separation)
 #
 # Usage: ./run_2gpu_comparison.sh [GPU1] [GPU2]
 #
@@ -26,7 +26,6 @@ INPUT_LEN=${INPUT_LEN:-512}
 OUTPUT_LEN=${OUTPUT_LEN:-256}
 OUTPUT_VARIANCE=${OUTPUT_VARIANCE:-0.25}
 SOURCE_DATASET=${SOURCE_DATASET:-"alpaca"}
-K_RATIO=${K_RATIO:-0.8}
 PORT=${PORT:-13000}
 SKIP_DISAGG=${SKIP_DISAGG:-0}
 KV_BUFFER_SIZE=${KV_BUFFER_SIZE:-2e10}
@@ -98,14 +97,16 @@ run_dp2_bench() {
     wait_for_gpu_memory $GPU1 60 || return 1
     wait_for_gpu_memory $GPU2 60 || return 1
 
-    # Set environment variables
+    # Set environment variables.
+    # ebplus = EB⁺ (auto MB↔EB switch) with IFR adaptive (k̂*, N̂*),
+    # matching the camera-ready paper.
     local env_prefix="CUDA_VISIBLE_DEVICES=${GPU1},${GPU2}"
     case "$scheduler" in
-        baseline)
+        v1)
             env_prefix="$env_prefix"
             ;;
-        pd_auto)
-            env_prefix="$env_prefix VLLM_PD_SCHEDULER_MODE=auto VLLM_PD_K_MODE=ratio VLLM_PD_K_RATIO=$K_RATIO VLLM_PD_CALIBRATION_FILE=$VLLM_PD_CALIBRATION_FILE"
+        ebplus)
+            env_prefix="$env_prefix VLLM_PD_SCHEDULER_MODE=auto VLLM_PD_K_MODE=ifr VLLM_PD_AUTO_COMPUTE_N=1 VLLM_PD_OOM_TOLERANCE=0.01 VLLM_PD_CALIBRATION_FILE=$VLLM_PD_CALIBRATION_FILE"
             ;;
     esac
 
@@ -208,8 +209,8 @@ run_disagg_bench() {
 # ========================================
 # Run experiments
 # ========================================
-run_dp2_bench "baseline" "bench_baseline.json" || echo "Warning: baseline failed"
-run_dp2_bench "pd_auto" "bench_pd_auto.json" || echo "Warning: pd_auto failed"
+run_dp2_bench "v1" "bench_v1.json" || echo "Warning: v1 failed"
+run_dp2_bench "ebplus" "bench_ebplus.json" || echo "Warning: ebplus failed"
 
 if [ "$SKIP_DISAGG" != "1" ]; then
     run_disagg_bench "bench_disagg.json" || echo "Warning: disagg failed"

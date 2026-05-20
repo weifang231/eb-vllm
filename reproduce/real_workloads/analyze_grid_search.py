@@ -119,7 +119,7 @@ def collect_grid_results(exp_dir: Path) -> Dict:
             "tb_values": [...],
             "bs_values": [...],
             "results": {
-                (tb, bs): {"baseline": metrics, "pd_ratio": metrics, ...}
+                (tb, bs): {"v1": metrics, "eb_kratio": metrics, ...}
             }
         }
     """
@@ -146,7 +146,7 @@ def collect_grid_results(exp_dir: Path) -> Dict:
 
             # Dynamically detect all bench_*.json files
             for bench_file in bs_dir.glob("bench_*.json"):
-                # Extract scheduler name from filename: bench_pd_ifr_1.json -> pd_ifr_1
+                # Extract scheduler name from filename: bench_eb_1.json -> pd_ifr_1
                 scheduler = bench_file.stem[6:]  # strip "bench_" prefix
                 bench_result = load_bench_result_fast(bench_file)
                 if bench_result:
@@ -188,14 +188,14 @@ def find_optimal_configs(data: Dict) -> Dict:
     return optimal
 
 
-def get_best_pd_variant(sched_results: Dict) -> Optional[str]:
-    """Return the best available PD variant (selected by throughput)."""
-    # Dynamically detect all schedulers starting with pd_
+def get_best_eb_variant(sched_results: Dict) -> Optional[str]:
+    """Return the best available EB variant (selected by throughput)."""
+    # Dynamically detect all schedulers starting with eb
     best_variant = None
     best_tp = 0
 
     for variant, metrics in sched_results.items():
-        if variant.startswith("pd_"):
+        if variant.startswith("eb"):
             tp = metrics.get("throughput", 0)
             if tp > best_tp:
                 best_tp = tp
@@ -205,7 +205,7 @@ def get_best_pd_variant(sched_results: Dict) -> Optional[str]:
 
 
 def compute_improvement_grid(data: Dict, metric: str, higher_better: bool = True) -> Tuple[np.ndarray, List, List]:
-    """Compute the PD-vs-baseline improvement grid."""
+    """Compute the EB-vs-v1 improvement grid."""
     tb_values = data["tb_values"]
     bs_values = data["bs_values"]
     results = data["results"]
@@ -216,15 +216,15 @@ def compute_improvement_grid(data: Dict, metric: str, higher_better: bool = True
         for j, bs in enumerate(bs_values):
             key = (tb, bs)
             if key in results:
-                baseline = results[key].get("baseline", {}).get(metric, 0)
-                pd_variant = get_best_pd_variant(results[key])
-                pd = results[key].get(pd_variant, {}).get(metric, 0) if pd_variant else 0
+                v1_val = results[key].get("v1", {}).get(metric, 0)
+                eb_variant = get_best_eb_variant(results[key])
+                eb_val = results[key].get(eb_variant, {}).get(metric, 0) if eb_variant else 0
 
-                if baseline > 0 and pd > 0:
+                if v1_val > 0 and eb_val > 0:
                     if higher_better:
-                        improvement = (pd - baseline) / baseline * 100
+                        improvement = (eb_val - v1_val) / v1_val * 100
                     else:
-                        improvement = (baseline - pd) / baseline * 100
+                        improvement = (v1_val - eb_val) / v1_val * 100
                     matrix[i, j] = improvement
 
     return matrix, tb_values, bs_values
@@ -303,11 +303,10 @@ def plot_optimal_comparison(optimal: Dict, output_dir: Path):
     ]
 
     schedulers = [
-        ("baseline", '#2ecc71', 'Baseline'),
-        ("pd_ratio", '#3498db', 'PD (ratio)'),
-        ("pd_ifr", '#9b59b6', 'PD (IFR)'),
-        ("pd_kratio", '#e74c3c', 'PD (θ*)'),
-        ("pd_dynamic", '#1abc9c', 'PD (DP)'),
+        ("v1",        '#2ecc71', 'v1'),
+        ("eb_kratio", '#3498db', 'EB (fixed θ*)'),
+        ("eb",        '#9b59b6', 'EB(k̂*)'),
+        ("ebplus",    '#1abc9c', 'EB+'),
     ]
 
     available_scheds = [(key, color, label) for key, color, label in schedulers if key in optimal]
@@ -336,21 +335,21 @@ def plot_optimal_comparison(optimal: Dict, output_dir: Path):
         x = np.arange(len(values))
         bars = ax.bar(x, values, color=colors)
 
-        # Compute PD-vs-baseline improvement
-        baseline_val = optimal.get("baseline", {}).get("metrics", {}).get(metric, 0)
+        # Compute EB-vs-v1 improvement
+        v1_val_opt = optimal.get("v1", {}).get("metrics", {}).get(metric, 0)
         # Find best PD (dynamically detect all schedulers starting with pd_)
-        best_pd_val = 0
+        best_eb_val = 0
         for key, opt_data in optimal.items():
             if key.startswith("pd_"):
                 val = opt_data["metrics"].get(metric, 0)
-                if val > best_pd_val:
-                    best_pd_val = val
+                if val > best_eb_val:
+                    best_eb_val = val
 
-        if baseline_val > 0 and best_pd_val > 0:
+        if v1_val > 0 and best_eb_val > 0:
             if higher_better:
-                improvement = (best_pd_val - baseline_val) / baseline_val * 100
+                improvement = (best_eb_val - v1_val) / v1_val * 100
             else:
-                improvement = (baseline_val - best_pd_val) / baseline_val * 100
+                improvement = (v1_val - best_eb_val) / v1_val * 100
             imp_str = f"Best PD vs Base: {improvement:+.1f}%"
             ax.annotate(imp_str, xy=(0.5, 0.95), xycoords='axes fraction',
                        ha='center', va='top', fontsize=9, fontweight='bold',
@@ -402,7 +401,7 @@ def generate_report(data: Dict, optimal: Dict) -> str:
 
         lines.append("")
 
-        # Comparison table: baseline and all pd_* schedulers
+        # Comparison table: v1 and all eb_* schedulers
         available = [(s, optimal[s]) for s in sorted(optimal.keys())]
         if len(available) >= 2:
             lines.append("-" * 80)
@@ -429,20 +428,20 @@ def generate_report(data: Dict, optimal: Dict) -> str:
                     vals.append(val)
                     row += f" {val:<15.2f}"
 
-                # Compute improvement (baseline vs best PD)
-                baseline_val = optimal.get("baseline", {}).get("metrics", {}).get(metric, 0)
-                best_pd_val = 0
+                # Compute improvement (v1 vs best EB)
+                v1_val_opt = optimal.get("v1", {}).get("metrics", {}).get(metric, 0)
+                best_eb_val = 0
                 for s, opt_data in optimal.items():
                     if s.startswith("pd_"):
                         v = opt_data["metrics"].get(metric, 0)
-                        if v > best_pd_val:
-                            best_pd_val = v
+                        if v > best_eb_val:
+                            best_eb_val = v
 
-                if baseline_val > 0 and best_pd_val > 0:
+                if v1_val > 0 and best_eb_val > 0:
                     if higher_better:
-                        imp = (best_pd_val - baseline_val) / baseline_val * 100
+                        imp = (best_eb_val - v1_val) / v1_val * 100
                     else:
-                        imp = (baseline_val - best_pd_val) / baseline_val * 100
+                        imp = (v1_val - best_eb_val) / v1_val * 100
                     row += f" {imp:+.2f}%"
 
                 lines.append(row)
@@ -459,11 +458,11 @@ def generate_report(data: Dict, optimal: Dict) -> str:
         winner = max(throughputs, key=throughputs.get)
         lines.append(f"Highest throughput: {winner} ({throughputs[winner]:.2f} req/s)")
 
-        if "baseline" in throughputs:
+        if "v1" in throughputs:
             for pd in sorted(throughputs.keys()):
                 if pd.startswith("pd_"):
-                    imp = (throughputs[pd] - throughputs["baseline"]) / throughputs["baseline"] * 100
-                    lines.append(f"  {pd} vs baseline: {imp:+.2f}%")
+                    imp = (throughputs[pd] - throughputs["v1"]) / throughputs["v1"] * 100
+                    lines.append(f"  {eb_val} vs v1: {imp:+.2f}%")
 
     lines.append("")
     return "\n".join(lines)

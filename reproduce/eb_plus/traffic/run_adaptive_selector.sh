@@ -1,26 +1,39 @@
 #!/bin/bash
 #
-# CFR online-controller validation experiment.
+# EB⁺ adaptive-selector experiment (paper §4.4, Table 4).
 #
-# For each of the three CFR workloads, runs a single (B, N) configuration
-# under EB(k̂) with the online estimator enabled.  The CFR update history
-# (saved into *_stats.json) lets the analysis script compare:
-#   (i)   p̂_0 vs ground-truth p_0 = 1/E[O];
-#         μ̂_L vs ground-truth E[L];
-#   (ii)  realised throughput vs the fluid-optimal TP(θ_0·N̂, N̂);
-#   (iii) OOM rate (preempted requests / total) vs the prescribed ε.
+# For each (workload, GPU) combination, runs three schedulers:
+#   v1      : MB (vLLM default)
+#   eb      : EB(k̂*) with IFR adaptive controller
+#   ebplus  : EB+ auto mode -- online MB↔EB switching driven by Δ(N)
+#
+# The mode_switch_history (saved in *_stats.json) gives the realised
+# selector choice and the diagnostic Δ(N) trace; the per-config bench
+# JSONs give the throughputs needed for the table.
+#
+# Restricted to a single (B, N) per workload so the table is comparable
+# across (workload × GPU).  Override defaults via env vars.
 #
 # Usage:
-#   ./run_validation_cfr.sh [MAX_GPUS]
+#   ./run_adaptive_selector.sh [MAX_GPUS]
 #
-# The (B, N) chosen here are sensible defaults for Qwen3-8B on H200 / RTX
-# PRO 6000 — override with BS / TB env vars if you have better numbers
-# from the grid search.
+# Notes on the diagnostic Δ(N):
+#   The diagnostic (equivalent to Eq. eq:comparison_condition / Prop. 4 in
+#   the camera-ready paper, rearranged as MB-minus-EB) uses kernel-cost
+#   terms (β_MB^e, α_MB)
+#   from a one-time kernel sweep.  If you have measured them, export
+#     VLLM_PD_BETA_MB_E=<f(\bar r)>
+#     VLLM_PD_ALPHA_MB=<α_MB>
+#     VLLM_PD_MB_COST_A / VLLM_PD_MB_COST_B / VLLM_PD_MB_COST_C
+#   before invoking this script.  Without those, the auto mode falls
+#   back to using α_p as α_MB and β_EB^w as β_MB^e (i.e. LHS of the
+#   crossover ≡ 0), which makes the decision driven entirely by the
+#   amortised-overhead RHS — still informative, but conservative.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../common/common_cfr.sh"
+source "${SCRIPT_DIR}/../../common/common_eb.sh"
 
 WORKER_PIDS=()
 cleanup() {
@@ -36,29 +49,17 @@ NUM_PROMPTS=${NUM_PROMPTS:-4000}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:-2048}
 NUM_WARMUP_REQUESTS=${NUM_WARMUP_REQUESTS:-100}
 RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0.5}
-BASE_PORT=${BASE_PORT:-10100}
+BASE_PORT=${BASE_PORT:-10200}
 SKIP_EXISTING=${SKIP_EXISTING:-1}
 
-# Per-workload (B, N) defaults — tuned for Qwen3-8B; override via env vars.
-# These BS values are the *initial* max-num-seqs caps; with auto-N enabled
-# below, the online controller dynamically shrinks N̂* ≤ BS as needed to
-# satisfy the OOM-tolerance constraint (Proposition prop:memory).
-TB_DECODE_HEAVY=${TB_DECODE_HEAVY:-16384};  BS_DECODE_HEAVY=${BS_DECODE_HEAVY:-2048}
-TB_BALANCED=${TB_BALANCED:-14336};          BS_BALANCED=${BS_BALANCED:-1024}
+SCHEDULERS=${SCHEDULERS:-"v1 eb ebplus"}
+SCENARIOS=${SCENARIOS:-"decode_heavy balanced prefill_heavy"}
+
+# Per-workload (B, N) defaults — same as validation script.
+TB_DECODE_HEAVY=${TB_DECODE_HEAVY:-16384};   BS_DECODE_HEAVY=${BS_DECODE_HEAVY:-2048}
+TB_BALANCED=${TB_BALANCED:-14336};           BS_BALANCED=${BS_BALANCED:-1024}
 TB_PREFILL_HEAVY=${TB_PREFILL_HEAVY:-18432}; BS_PREFILL_HEAVY=${BS_PREFILL_HEAVY:-512}
 
-# Online-estimator pacing — match the paper's reported window sizes.
-export VLLM_PD_PARAM_UPDATE_INTERVAL=${VLLM_PD_PARAM_UPDATE_INTERVAL:-100}
-export VLLM_PD_IFR_UPDATE_INTERVAL=${VLLM_PD_IFR_UPDATE_INTERVAL:-100}
-export VLLM_PD_IFR_WINDOW_SIZE=${VLLM_PD_IFR_WINDOW_SIZE:-500}
-export VLLM_PD_IFR_MIN_SAMPLES=${VLLM_PD_IFR_MIN_SAMPLES:-50}
-# Memory-safe online controller (Proposition prop:memory) is ENABLED by
-# default to match the paper's actual experimental setup: EB(k̂*) figures
-# (e.g. Fig. fig:validation) were produced with VLLM_PD_AUTO_COMPUTE_N=1,
-# with the BS values above acting as upper caps on the dynamically-computed
-# N̂*. The paper caption "N=1024" refers to the v1 baseline / fixed-k sweep;
-# EB(k̂*) uses the effective batch size min(N̂*, BS). Set =0 to disable
-# auto-shrink and force fixed N=BS for all schedulers.
 export VLLM_PD_AUTO_COMPUTE_N=${VLLM_PD_AUTO_COMPUTE_N:-1}
 export VLLM_PD_OOM_TOLERANCE=${VLLM_PD_OOM_TOLERANCE:-0.01}
 
@@ -68,56 +69,59 @@ resolve_calibration "$MODEL"
 read_calibration_params
 
 MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
-OUTPUT_DIR=${OUTPUT_DIR:-"${SCRIPT_DIR}/outputs/controller_validation/${GPU_TAG}_${MODEL_SHORT}"}
+OUTPUT_DIR=${OUTPUT_DIR:-"${SCRIPT_DIR}/outputs/adaptive_selector/${GPU_TAG}_${MODEL_SHORT}"}
 mkdir -p "$OUTPUT_DIR"
 
 select_gpus "$MAX_GPUS"
 
 echo "========================================"
-echo "CFR controller-validation experiment"
+echo "EB⁺ adaptive-selector experiment (paper §4.4 Table 4)"
 echo "========================================"
 echo "  GPU: ${GPU_NAME} (${GPU_TAG}); MODEL: ${MODEL}"
-echo "  ε (OOM tolerance): ${VLLM_PD_OOM_TOLERANCE}"
-echo "  Update interval: ${VLLM_PD_IFR_UPDATE_INTERVAL}"
-echo "  Window size: ${VLLM_PD_IFR_WINDOW_SIZE} (min samples=${VLLM_PD_IFR_MIN_SAMPLES})"
+echo "  SCHEDULERS: ${SCHEDULERS}"
+echo "  SCENARIOS: ${SCENARIOS}"
+echo "  ε: ${VLLM_PD_OOM_TOLERANCE}; auto-N: ${VLLM_PD_AUTO_COMPUTE_N}"
+echo "  Kernel terms: β_MB^e=${VLLM_PD_BETA_MB_E:-default}, α_MB=${VLLM_PD_ALPHA_MB:-default}"
+echo "  MB-cost f(r): a=${VLLM_PD_MB_COST_A:-0}, b=${VLLM_PD_MB_COST_B:-0}, c=${VLLM_PD_MB_COST_C:-0}"
 echo "  OUTPUT: ${OUTPUT_DIR}"
 echo ""
 
-# ----------------------------------------------------------------------
-# Build queue: one (workload × scheduler) per row; we run v1 too as a
-# reference TP for the "throughput attainment" column.
-# ----------------------------------------------------------------------
 QUEUE_FILE="${OUTPUT_DIR}/experiment_queue.txt"
 > "$QUEUE_FILE"
-for scenario in decode_heavy balanced prefill_heavy; do
+for scenario in $SCENARIOS; do
     case "$scenario" in
         decode_heavy)   tb=$TB_DECODE_HEAVY;   bs=$BS_DECODE_HEAVY ;;
         balanced)       tb=$TB_BALANCED;       bs=$BS_BALANCED ;;
         prefill_heavy)  tb=$TB_PREFILL_HEAVY;  bs=$BS_PREFILL_HEAVY ;;
+        table4)         tb=$TB_BALANCED;       bs=$BS_BALANCED ;;  # paper §4.4: μ_L=512, μ_O=256
     esac
-    echo "v1|${scenario}|${bs}|${tb}"     >> "$QUEUE_FILE"
-    echo "eb_khat|${scenario}|${bs}|${tb}" >> "$QUEUE_FILE"
+    for sched in $SCHEDULERS; do
+        echo "${sched}|${scenario}|${bs}|${tb}" >> "$QUEUE_FILE"
+    done
 done
 TOTAL_EXPERIMENTS=$(wc -l < "$QUEUE_FILE")
 
 cat > "${OUTPUT_DIR}/experiment_config.json" <<EOF
 {
-    "experiment_type": "cfr_controller_validation",
+    "experiment_type": "adaptive_selector",
     "gpu_name": "${GPU_NAME}",
     "gpu_tag": "${GPU_TAG}",
     "model": "${MODEL}",
     "num_prompts": ${NUM_PROMPTS},
     "max_concurrency": ${MAX_CONCURRENCY},
-    "num_warmup_requests": ${NUM_WARMUP_REQUESTS},
-    "ifr_update_interval": ${VLLM_PD_IFR_UPDATE_INTERVAL},
-    "ifr_window_size": ${VLLM_PD_IFR_WINDOW_SIZE},
-    "ifr_min_samples": ${VLLM_PD_IFR_MIN_SAMPLES},
-    "auto_compute_n": ${VLLM_PD_AUTO_COMPUTE_N},
-    "oom_tolerance": ${VLLM_PD_OOM_TOLERANCE},
-    "scenarios": {
-        "decode_heavy":   {"input_len": 128,  "output_len": 1024, "bs": ${BS_DECODE_HEAVY},  "tb": ${TB_DECODE_HEAVY}},
-        "balanced":       {"input_len": 512,  "output_len": 512,  "bs": ${BS_BALANCED},      "tb": ${TB_BALANCED}},
-        "prefill_heavy":  {"input_len": 1024, "output_len": 128,  "bs": ${BS_PREFILL_HEAVY}, "tb": ${TB_PREFILL_HEAVY}}
+    "schedulers": [$(echo "$SCHEDULERS" | sed 's/[^ ]*/"&"/g' | sed 's/ /, /g')],
+    "scenarios": [$(echo "$SCENARIOS" | sed 's/[^ ]*/"&"/g' | sed 's/ /, /g')],
+    "scenario_configs": {
+        "decode_heavy":   {"input_len": 128,  "output_len": 1024, "bs": ${BS_DECODE_HEAVY},   "tb": ${TB_DECODE_HEAVY}},
+        "balanced":       {"input_len": 512,  "output_len": 512,  "bs": ${BS_BALANCED},       "tb": ${TB_BALANCED}},
+        "prefill_heavy":  {"input_len": 1024, "output_len": 128,  "bs": ${BS_PREFILL_HEAVY},  "tb": ${TB_PREFILL_HEAVY}}
+    },
+    "kernel_calibration": {
+        "beta_mb_e":   "${VLLM_PD_BETA_MB_E:-}",
+        "alpha_mb":    "${VLLM_PD_ALPHA_MB:-}",
+        "mb_cost_a":   "${VLLM_PD_MB_COST_A:-}",
+        "mb_cost_b":   "${VLLM_PD_MB_COST_B:-}",
+        "mb_cost_c":   "${VLLM_PD_MB_COST_C:-}"
     },
     "calibration_file": "${VLLM_PD_CALIBRATION_FILE}",
     "calibration_params": {
@@ -131,7 +135,7 @@ EOF
 
 run_experiment() {
     local gpu_id=$1 sched=$2 scenario=$3 bs=$4 tb=$5
-    set_cfr_scenario "$scenario"
+    set_workload_scenario "$scenario"
     local port=$((BASE_PORT + gpu_id))
     local result_dir="${OUTPUT_DIR}/${scenario}_in${INPUT_LEN}_out${OUTPUT_LEN}"
     local result_file="${result_dir}/bench_${sched}.json"
@@ -146,7 +150,6 @@ run_experiment() {
     check_port_available "$port" "$gpu_id" || return 1
 
     echo "[GPU $gpu_id] START ${sched} ${scenario} bs=${bs} tb=${tb}"
-
     export CUDA_VISIBLE_DEVICES=$gpu_id
     export VLLM_COLLECT_SCHEDULE_STATS=1
     set_scheduler_env "$sched" || return 1
@@ -170,7 +173,7 @@ run_experiment() {
     vllm bench serve \
         --model "$MODEL" \
         --base-url "http://localhost:${port}" \
-        --dataset-name geometric_random \
+        --dataset-name "${DATASET_NAME:-random}" \
         --random-input-len "$INPUT_LEN" \
         --random-output-len "$OUTPUT_LEN" \
         --random-range-ratio "$RANDOM_RANGE_RATIO" \
@@ -222,4 +225,4 @@ for pid in "${WORKER_PIDS[@]}"; do wait "$pid" || true; done
 print_summary "$PROGRESS_FILE" "$TOTAL_EXPERIMENTS" "$OUTPUT_DIR"
 echo ""
 echo "Analyse with:"
-echo "  python ${SCRIPT_DIR}/analyze_cfr_validation.py ${OUTPUT_DIR}"
+echo "  python ${SCRIPT_DIR}/analyze_selector.py ${OUTPUT_DIR}"

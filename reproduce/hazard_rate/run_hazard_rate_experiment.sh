@@ -38,7 +38,7 @@ trap cleanup EXIT INT TERM HUP
 # CLI args and env-var configuration
 # ========================================
 MAX_GPUS=${1:-4}
-MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-256}        # used by baseline
+MAX_BATCH_SIZE=${MAX_BATCH_SIZE:-256}        # used by v1 baseline (scheduler "v1")
 PD_MAX_BATCH_SIZE=${PD_MAX_BATCH_SIZE:-256}  # used by P/D separation (N=256)
 NUM_PROMPTS=${NUM_PROMPTS:-3000}
 MODEL=${MODEL:-"Qwen/Qwen3-8B"}
@@ -162,7 +162,7 @@ for config in "${GAMMA_CONFIGS[@]}"; do
     # Baseline experiment
     if [ "$RUN_BASELINE" = "1" ]; then
         for ((run=1; run<=NUM_REPEATS; run++)); do
-            echo "baseline|${INPUT_LEN}|${OUTPUT_LEN}|${shape}|${hazard_type}||${run}" >> "$QUEUE_FILE"
+            echo "v1|${INPUT_LEN}|${OUTPUT_LEN}|${shape}|${hazard_type}||${run}" >> "$QUEUE_FILE"
         done
     fi
 
@@ -170,7 +170,7 @@ for config in "${GAMMA_CONFIGS[@]}"; do
     if [ "$RUN_KSTAR" = "1" ] && [ ${#K_STAR_VALUES[@]} -gt 0 ]; then
         for k_star in "${K_STAR_VALUES[@]}"; do
             for ((run=1; run<=NUM_REPEATS; run++)); do
-                echo "kstar|${INPUT_LEN}|${OUTPUT_LEN}|${shape}|${hazard_type}|${k_star}|${run}" >> "$QUEUE_FILE"
+                echo "eb_kstar|${INPUT_LEN}|${OUTPUT_LEN}|${shape}|${hazard_type}|${k_star}|${run}" >> "$QUEUE_FILE"
             done
         done
     fi
@@ -178,7 +178,7 @@ for config in "${GAMMA_CONFIGS[@]}"; do
     # Direct mode
     if [ "$RUN_DIRECT" = "1" ]; then
         for ((run=1; run<=NUM_REPEATS; run++)); do
-            echo "direct|${INPUT_LEN}|${OUTPUT_LEN}|${shape}|${hazard_type}||${run}" >> "$QUEUE_FILE"
+            echo "eb_direct|${INPUT_LEN}|${OUTPUT_LEN}|${shape}|${hazard_type}||${run}" >> "$QUEUE_FILE"
         done
     fi
 done
@@ -249,14 +249,14 @@ run_experiment() {
 
     # Set parameters per experiment type
     case "$exp_type" in
-        baseline)
-            result_prefix="baseline"
+        v1)
+            result_prefix="v1"
             ;;
-        kstar)
+        eb_kstar)
             result_prefix="fixed${param}"
             ;;
-        direct)
-            result_prefix="direct"
+        eb_direct)
+            result_prefix="eb_direct"
             ;;
     esac
 
@@ -290,27 +290,30 @@ run_experiment() {
     local serve_args="--gpu-memory-utilization 0.9"
 
     case "$exp_type" in
-        baseline)
+        v1)
             export VLLM_USE_PD_SCHEDULER=0
-            unset VLLM_PD_K_MODE VLLM_PD_K_STAR VLLM_PD_K_RATIO VLLM_PD_N_MODE VLLM_PD_OOM_TOLERANCE
             [ -n "$MAX_BATCH_SIZE" ] && serve_args="$serve_args --max-num-seqs $MAX_BATCH_SIZE"
             [ -n "$TOKEN_BUDGET_DEFAULT" ] && serve_args="$serve_args --max-num-batched-tokens $TOKEN_BUDGET_DEFAULT"
             ;;
-        kstar)
+        eb_kstar)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=direct
             export VLLM_PD_K_STAR=$param
             export VLLM_PD_N_MODE=$PD_N_MODE
             export VLLM_PD_OOM_TOLERANCE=$PD_OOM_TOLERANCE
-            unset VLLM_PD_K_RATIO
             serve_args="$serve_args --max-num-seqs $PD_MAX_BATCH_SIZE --max-num-batched-tokens $TOKEN_BUDGET_PD"
             ;;
-        direct)
+        eb_direct)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=direct
             export VLLM_PD_N_MODE=$PD_N_MODE
             export VLLM_PD_OOM_TOLERANCE=$PD_OOM_TOLERANCE
-            unset VLLM_PD_K_RATIO VLLM_PD_K_STAR
+            # Load-bearing: eb_kstar runs earlier in this queue and exports
+            # VLLM_PD_K_STAR=$param. Both eb_kstar and eb_direct use K_MODE=direct,
+            # so a stale K_STAR would silently turn eb_direct into eb_kstar
+            # (scheduler.py:398 checks pd_k_star_user_specified to skip
+            # _compute_optimal_k). Unset to force controller-picked k.
+            unset VLLM_PD_K_STAR
             serve_args="$serve_args --max-num-seqs $PD_MAX_NUM_SEQS --max-num-batched-tokens $TOKEN_BUDGET_PD"
             ;;
     esac

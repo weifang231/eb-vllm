@@ -27,17 +27,17 @@ if [ -z "${1:-}" ]; then
     echo "  SKIP_CALIBRATION=true   skip calibration step"
     echo "  SKIP_EXPORT=true        skip dataset export step"
     echo "  EXPERIMENTS=\"sharegpt numina_math\"  only run specified experiments"
-    echo "  SCHEDULERS=\"baseline pd_ratio pd_ifr\"  only run specified scheduler modes"
+    echo "  SCHEDULERS=\"v1 eb_kratio eb\"  only run specified scheduler modes"
     echo "  SKIP_EXISTING=0         do not skip existing results (default: skip)"
     echo "  VERSION=1               filename suffix, used for repeated runs to produce ifr_1, ifr_2, etc."
     echo ""
     echo "Scheduler modes (SCHEDULERS):"
-    echo "  baseline   vLLM default scheduler"
-    echo "  pd_ratio   PD scheduler with ratio mode (θ*=K_RATIO)"
-    echo "  pd_ifr     PD scheduler with IFR mode (adaptive θ* based on hazard rate)"
+    echo "  v1         vLLM v1 mixed-batching baseline"
+    echo "  eb_kratio  EB ablation: fixed θ* (K_MODE=ratio) (θ*=K_RATIO)"
+    echo "  eb         EB(k̂*) adaptive IFR controller (adaptive θ* based on hazard rate)"
     echo ""
-    echo "Example - run only pd_ifr mode experiments:"
-    echo "  SCHEDULERS=pd_ifr $0 Qwen/Qwen3-8B 4"
+    echo "Example - run only EB(k̂*) experiments:"
+    echo "  SCHEDULERS=eb $0 Qwen/Qwen3-8B 4"
     exit 1
 fi
 

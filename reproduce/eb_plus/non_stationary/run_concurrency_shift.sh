@@ -11,7 +11,7 @@
 #   Phase 2: high concurrency  (concurrency=2048)
 #   Phase 3: mid concurrency   (concurrency=500)
 #   Server stays up; benchmarks at different concurrencies are sent sequentially.
-#   Compare: pd_ifr (adaptive theta*) vs pd_ratio (fixed theta*=0.8)
+#   Compare: eb (adaptive theta*) vs eb_kratio (fixed theta*=0.8)
 #
 # Usage: ./run_concurrency_shift.sh [GPU_ID]
 #
@@ -135,7 +135,7 @@ cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
     "output_variance": ${OUTPUT_VARIANCE},
     "ifr_window_size": ${IFR_WINDOW_SIZE},
     "k_ratio": ${K_RATIO},
-    "schedulers": ["baseline", "pd_ifr", "pd_ratio", "pd_auto"],
+    "schedulers": ["v1", "eb", "eb_kratio", "ebplus"],
     "calibration_file": "${VLLM_PD_CALIBRATION_FILE}",
     "timestamp": "$(date -Iseconds)"
 }
@@ -165,22 +165,28 @@ run_single_experiment() {
           VLLM_PD_K_STAR VLLM_PD_IFR_WINDOW_SIZE VLLM_PD_SCHEDULER_MODE
 
     case "$scheduler" in
-        baseline)
+        v1)
             ;;
-        pd_ifr)
+        eb)
+            # EB(k̂*) with IFR adaptive (k̂*, N̂*) — paper Algorithm 1.
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=ifr
             export VLLM_PD_IFR_WINDOW_SIZE=$IFR_WINDOW_SIZE
+            export VLLM_PD_AUTO_COMPUTE_N=1
+            export VLLM_PD_OOM_TOLERANCE=0.01
             ;;
-        pd_ratio)
+        eb_kratio)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=ratio
             export VLLM_PD_K_RATIO=$K_RATIO
             ;;
-        pd_auto)
+        ebplus)
+            # EB⁺ = auto MB↔EB switch with IFR adaptive (k̂*, N̂*),
+            # matching the camera-ready paper Algorithm 1.
             export VLLM_PD_SCHEDULER_MODE=auto
-            export VLLM_PD_K_MODE=ratio
-            export VLLM_PD_K_RATIO=$K_RATIO
+            export VLLM_PD_K_MODE=ifr
+            export VLLM_PD_AUTO_COMPUTE_N=1
+            export VLLM_PD_OOM_TOLERANCE=0.01
             ;;
     esac
 
@@ -196,6 +202,7 @@ run_single_experiment() {
     vllm serve "$MODEL" \
         --port "$port" \
         --gpu-memory-utilization 0.9 \
+        --max-model-len 16384 \
         --max-num-seqs "$BS" \
         --max-num-batched-tokens "$TB" \
         $dtype_arg >> "$log_file" 2>&1 &
@@ -259,8 +266,8 @@ run_single_experiment() {
 }
 
 # Run the requested schedulers (controlled via the SCHEDULERS env var)
-# Example: SCHEDULERS="baseline,pd_auto" bash run_concurrency_shift.sh 0
-DEFAULT_SCHEDULERS="baseline,pd_ifr,pd_ratio,pd_auto"
+# Example: SCHEDULERS="v1,ebplus" bash run_concurrency_shift.sh 0
+DEFAULT_SCHEDULERS="v1,eb,eb_kratio,ebplus"
 IFS=',' read -ra SCHEDULER_LIST <<< "${SCHEDULERS:-$DEFAULT_SCHEDULERS}"
 for sched in "${SCHEDULER_LIST[@]}"; do
     sched=$(echo "$sched" | tr -d ' ')

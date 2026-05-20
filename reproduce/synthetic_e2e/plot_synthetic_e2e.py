@@ -1,4 +1,4 @@
-"""Plot the synthetic-workload e2e figure (§4.3.1) from analyze_cfr_e2e.py output.
+"""Plot the synthetic-workload e2e figure (§4.3.1) from analyze_e2e.py output.
 
 Reads `optimal_per_scheduler.csv` (one row per (scheduler, scenario) at the
 best-throughput (B, N)) and produces a 3-metric bar figure:
@@ -24,8 +24,8 @@ SCENARIOS = [
 
 # Schedulers we expect to find in the CSV. v0 is optional (only present if
 # its grid search was actually run).
-SCHEDULERS = [("v0", "v0"), ("v1", "v1"), ("eb_khat", "EB(k̂*)")]
-COLORS = {"v0": "#7f7f7f", "v1": "#d62728", "eb_khat": "#1f77b4"}
+SCHEDULERS = [("v0", "v0"), ("v1", "v1"), ("eb", "EB(k̂*)")]
+COLORS = {"v0": "#7f7f7f", "v1": "#d62728", "eb": "#1f77b4"}
 
 METRICS = [
     # (column, label, higher_is_better)
@@ -57,7 +57,7 @@ def main() -> None:
     p.add_argument(
         "--grid-search-dir",
         default="outputs/e2e_grid_search",
-        help="Output dir from analyze_cfr_e2e.py "
+        help="Output dir from analyze_e2e.py "
              "(contains <GPU>_<MODEL>/optimal_per_scheduler.csv)",
     )
     p.add_argument("--output", default="fig_synthetic_e2e.pdf")
@@ -68,8 +68,8 @@ def main() -> None:
         raise SystemExit(
             f"Grid dir not found: {base}\n"
             "Generate it first with:\n"
-            "  ./run_grid_search_cfr.sh\n"
-            "  python analyze_cfr_e2e.py outputs/e2e_grid_search/<GPU>_<MODEL>"
+            "  ./run_grid_search.sh\n"
+            "  python analyze_e2e.py outputs/e2e_grid_search/<GPU>_<MODEL>"
         )
 
     # Auto-pick the <GPU>_<MODEL>/ subdir if user passed the parent dir.

@@ -163,7 +163,7 @@ phase_A_real_workloads() {
             if skip_if_exists "$out" "Table 2/3 $short × $wl"; then continue; fi
             log "  Running $short × $wl (out_len=$ol) ..."
             GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) \
-                SCHEDULERS="baseline pd_ifr" IGNORE_EOS=true CUSTOM_OUTPUT_LEN=$ol \
+                SCHEDULERS="v1 eb" IGNORE_EOS=true CUSTOM_OUTPUT_LEN=$ol \
                 OUTPUT_DIR_SUFFIX="_${GPU_TAG}" MODEL="$MODEL" \
                 bash run_optimal_only.sh "$ds" "$MAX_GPUS" \
                 > "$LOGDIR/A_${short}_${wl}.log" 2>&1
@@ -175,7 +175,7 @@ phase_A_real_workloads() {
         local wc_out="$ROOT/reproduce/real_workloads/outputs/multiturn_wildchat_multiturn_${short}_Clients_2048_MaxTurns_12/.done"
         if skip_if_exists "$wc_out" "Table 2/3 $short × wildchat"; then continue; fi
         log "  Running $short × wildchat (multi-turn) ..."
-        GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) SCHEDULERS="baseline pd_ifr" MODEL="$MODEL" \
+        GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) SCHEDULERS="v1 eb" MODEL="$MODEL" \
             bash multiturn/run_optimal_only.sh ../outputs/wildchat_multiturn.json "$MAX_GPUS" \
             > "$LOGDIR/A_${short}_wildchat.log" 2>&1
         touch "$wc_out"
@@ -196,8 +196,8 @@ phase_B_synthetic() {
         out="outputs/e2e_grid_search/${GPU_TAG}_${short}/.done"
         if skip_if_exists "$out" "Fig 4 grid $short"; then continue; fi
         log "  Running Fig 4 grid for $short ..."
-        GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) SCHEDULERS="v1 eb_khat" MODEL="$MODEL" \
-            bash run_grid_search_cfr.sh "$MAX_GPUS" \
+        GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) SCHEDULERS="v1 eb" MODEL="$MODEL" \
+            bash run_grid_search.sh "$MAX_GPUS" \
             > "$LOGDIR/B_${short}.log" 2>&1
         touch "$out"
         log "  ✓ $short grid done"
@@ -217,9 +217,9 @@ phase_C_beta_mb_fit() {
 import json
 d = json.load(open('$fit_file'))
 e = d['env_vars_for_pd_auto']
-print(f'VLLM_PD_CP_COST_A={e[\"VLLM_PD_CP_COST_A\"]}')
-print(f'VLLM_PD_CP_COST_B={e[\"VLLM_PD_CP_COST_B\"]}')
-print(f'VLLM_PD_CP_COST_C={e[\"VLLM_PD_CP_COST_C\"]}')")
+print(f'VLLM_PD_MB_COST_A={e[\"VLLM_PD_MB_COST_A\"]}')
+print(f'VLLM_PD_MB_COST_B={e[\"VLLM_PD_MB_COST_B\"]}')
+print(f'VLLM_PD_MB_COST_C={e[\"VLLM_PD_MB_COST_C\"]}')")
         return 0
     fi
 
@@ -251,9 +251,9 @@ out = {
                               "b (s/tok)": float(b),
                               "c (s/tok)": float(c)},
     "env_vars_for_pd_auto": {
-        "VLLM_PD_CP_COST_A": f"{a:.6e}",
-        "VLLM_PD_CP_COST_B": f"{b:.6e}",
-        "VLLM_PD_CP_COST_C": f"{c:.6e}",
+        "VLLM_PD_MB_COST_A": f"{a:.6e}",
+        "VLLM_PD_MB_COST_B": f"{b:.6e}",
+        "VLLM_PD_MB_COST_C": f"{c:.6e}",
     },
 }
 with open("$fit_file", "w") as f:
@@ -265,9 +265,9 @@ PY
 import json
 d = json.load(open('$fit_file'))
 e = d['env_vars_for_pd_auto']
-print(f'VLLM_PD_CP_COST_A={e[\"VLLM_PD_CP_COST_A\"]}')
-print(f'VLLM_PD_CP_COST_B={e[\"VLLM_PD_CP_COST_B\"]}')
-print(f'VLLM_PD_CP_COST_C={e[\"VLLM_PD_CP_COST_C\"]}')")
+print(f'VLLM_PD_MB_COST_A={e[\"VLLM_PD_MB_COST_A\"]}')
+print(f'VLLM_PD_MB_COST_B={e[\"VLLM_PD_MB_COST_B\"]}')
+print(f'VLLM_PD_MB_COST_C={e[\"VLLM_PD_MB_COST_C\"]}')")
     log "  ✓ β_MB coefficients saved + exported (env)"
 }
 
@@ -286,7 +286,7 @@ phase_D_eb_plus_traffic() {
         if skip_if_exists "$out" "Table 4 $short"; then continue; fi
         log "  Running EB+ traffic for $short ..."
         GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) MODEL="$MODEL" \
-            bash run_adaptive_selector_cfr.sh "$MAX_GPUS" \
+            bash run_adaptive_selector.sh "$MAX_GPUS" \
             > "$LOGDIR/D_${short}.log" 2>&1
         touch "$out"
         log "  ✓ $short EB+ traffic done"
@@ -311,7 +311,7 @@ phase_E_eb_plus_nonstat() {
     # spec). Without unset, child crashes parsing "A" or "E" as a phase.
     if ! ls outputs/distribution_shift_Qwen3-8B_*/bench_pd_auto.json 1>/dev/null 2>&1; then
         log "  Running distribution_shift on GPU $DIST_GPU ..."
-        env -u PHASES SCHEDULERS="baseline,pd_ifr,pd_auto" \
+        env -u PHASES SCHEDULERS="v1,eb,ebplus" \
             bash run_distribution_shift.sh "$DIST_GPU" \
             > "$LOGDIR/E_distshift.log" 2>&1
         log "  ✓ distshift done"
@@ -321,7 +321,7 @@ phase_E_eb_plus_nonstat() {
 
     if ! ls outputs/concurrency_shift_Qwen3-8B_*/bench_pd_auto_phase3_c500.json 1>/dev/null 2>&1; then
         log "  Running concurrency_shift on GPU $CONC_GPU ..."
-        env -u PHASES SCHEDULERS="baseline,pd_ifr,pd_auto" \
+        env -u PHASES SCHEDULERS="v1,eb,ebplus" \
             bash run_concurrency_shift.sh "$CONC_GPU" \
             > "$LOGDIR/E_concshift.log" 2>&1
         log "  ✓ concshift done"
@@ -341,7 +341,7 @@ phase_F_validation() {
     if skip_if_exists "$out" "Fig 3 validation"; then return 0; fi
     log "  Running validation grid ..."
     GPUS=$(seq -s, $GPU_OFFSET $((GPU_OFFSET + MAX_GPUS - 1))) MODEL=Qwen/Qwen3-8B \
-        bash run_validation_cfr.sh "$MAX_GPUS" \
+        bash run_validation.sh "$MAX_GPUS" \
         > "$LOGDIR/F_validation.log" 2>&1
     touch "$out"
     log "  ✓ Fig 3 done"

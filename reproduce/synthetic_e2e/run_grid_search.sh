@@ -1,18 +1,18 @@
 #!/bin/bash
 #
-# CFR end-to-end grid search experiment.
+# Synthetic-workload end-to-end grid search (paper §4.3.1).
 #
-# Sweeps (token_budget, max_num_seqs) over the three CFR workloads
+# Sweeps (token_budget, max_num_seqs) over the three synthetic workloads
 # (decode-heavy / balanced / prefill-heavy) and runs the v1 baseline (MB)
-# against EB(k̂) using the CFR midpoint scheduler.
+# against EB(k̂*) using the IFR adaptive controller (camera-ready paper).
 #
 # Usage:
-#   ./run_grid_search_cfr.sh [MAX_GPUS]
+#   ./run_grid_search.sh [MAX_GPUS]
 #
 # Common overrides:
 #   MODEL=Qwen/Qwen3-8B
 #   NUM_PROMPTS=4000   MAX_CONCURRENCY=2048
-#   SCHEDULERS="v1 eb_khat"      # default
+#   SCHEDULERS="v1 eb"           # default
 #   SCENARIOS="decode_heavy balanced prefill_heavy"
 #   BS_VALUES="256 512 1024 1536 2048"
 #   TB_VALUES="4096 8192 10240 14336 16384 18432"
@@ -22,7 +22,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/../common/common_cfr.sh"
+source "${SCRIPT_DIR}/../common/common_eb.sh"
 
 WORKER_PIDS=()
 cleanup() {
@@ -44,7 +44,7 @@ RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0.5}   # CFR uses Uniform[0.5,1.5]·E[L
 BASE_PORT=${BASE_PORT:-10000}
 SKIP_EXISTING=${SKIP_EXISTING:-1}
 
-SCHEDULERS=${SCHEDULERS:-"v1 eb_khat"}
+SCHEDULERS=${SCHEDULERS:-"v1 eb"}
 SCENARIOS=${SCENARIOS:-"decode_heavy balanced prefill_heavy"}
 BS_VALUES=(${BS_VALUES:-256 512 1024 1536 2048})
 TB_VALUES=(${TB_VALUES:-4096 8192 10240 14336 16384 18432})
@@ -64,7 +64,7 @@ mkdir -p "$OUTPUT_DIR"
 select_gpus "$MAX_GPUS"
 
 echo "========================================"
-echo "CFR end-to-end grid search"
+echo "Synthetic-workload end-to-end grid search (paper §4.3.1)"
 echo "========================================"
 echo "  GPU: ${GPU_NAME} (${GPU_TAG})"
 echo "  MODEL: ${MODEL}"
@@ -96,7 +96,7 @@ echo "Total experiments: ${TOTAL_EXPERIMENTS}"
 
 cat > "${OUTPUT_DIR}/experiment_config.json" <<EOF
 {
-    "experiment_type": "cfr_e2e_grid_search",
+    "experiment_type": "e2e_grid_search",
     "gpu_name": "${GPU_NAME}",
     "gpu_tag": "${GPU_TAG}",
     "model": "${MODEL}",
@@ -124,7 +124,7 @@ EOF
 # ----------------------------------------------------------------------
 run_experiment() {
     local gpu_id=$1 sched=$2 scenario=$3 bs=$4 tb=$5
-    set_cfr_scenario "$scenario"
+    set_workload_scenario "$scenario"
     local port=$((BASE_PORT + gpu_id))
     local result_dir="${OUTPUT_DIR}/tb${tb}/bs${bs}/${scenario}_in${INPUT_LEN}_out${OUTPUT_LEN}"
     local result_file="${result_dir}/bench_${sched}.json"
@@ -223,4 +223,4 @@ done
 print_summary "$PROGRESS_FILE" "$TOTAL_EXPERIMENTS" "$OUTPUT_DIR"
 echo ""
 echo "Analyse with:"
-echo "  python ${SCRIPT_DIR}/analyze_cfr_e2e.py ${OUTPUT_DIR}"
+echo "  python ${SCRIPT_DIR}/analyze_e2e.py ${OUTPUT_DIR}"

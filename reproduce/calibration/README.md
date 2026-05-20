@@ -1,7 +1,7 @@
 # Calibration files
 
 The EB scheduler reads a per-(model, GPU) calibration JSON to initialize the
-cost-model coefficients. The runner (`common/common_cfr.sh::resolve_calibration`)
+cost-model coefficients. The runner (`common/common_eb.sh::resolve_calibration`)
 looks up files by name:
 
 ```

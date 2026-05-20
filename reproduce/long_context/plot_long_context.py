@@ -31,9 +31,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-SCHEDULERS = ["v1", "eb_khat", "eb_plus"]
-SCHEDULER_LABELS = {"v1": "v1", "eb_khat": "EB(k̂*)", "eb_plus": "EB⁺"}
-COLORS = {"v1": "tab:red", "eb_khat": "tab:blue", "eb_plus": "tab:green"}
+SCHEDULERS = ["v1", "eb", "ebplus"]
+SCHEDULER_LABELS = {"v1": "v1", "eb": "EB(k̂*)", "ebplus": "EB⁺"}
+COLORS = {"v1": "tab:red", "eb": "tab:blue", "ebplus": "tab:green"}
 METRICS = [
     ("throughput", "Throughput (RPS)", True),
     ("mean_ttft_ms", "Mean TTFT (ms)", False),
@@ -67,12 +67,12 @@ def demo_rows() -> list[dict]:
                      "mean_ttft_ms": 4000 * (c / 8192) ** 1.3 + rng.normal(0, 50),
                      "mean_tpot_ms": 60 + 0.5 * np.log2(c / 1024),
                      "mean_itl_ms": 60 + 0.6 * np.log2(c / 1024)})
-        rows.append({"context_len": c, "scheduler": "eb_khat",
+        rows.append({"context_len": c, "scheduler": "eb",
                      "throughput": base_t * 1.0 + rng.normal(0, 0.1),
                      "mean_ttft_ms": 5500 * (c / 8192) ** 1.3 + rng.normal(0, 50),
                      "mean_tpot_ms": 50 + 0.3 * np.log2(c / 1024),
                      "mean_itl_ms": 50 + 0.4 * np.log2(c / 1024)})
-        rows.append({"context_len": c, "scheduler": "eb_plus",
+        rows.append({"context_len": c, "scheduler": "ebplus",
                      "throughput": base_t * 1.08 + rng.normal(0, 0.1),
                      "mean_ttft_ms": 4500 * (c / 8192) ** 1.3 + rng.normal(0, 50),
                      "mean_tpot_ms": 53 + 0.35 * np.log2(c / 1024),

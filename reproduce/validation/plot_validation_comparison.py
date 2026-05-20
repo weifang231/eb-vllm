@@ -105,10 +105,10 @@ def main() -> None:
                 ax.axhline(r["v1"]["tp_real"], color=C_V1, linewidth=1.2,
                            alpha=0.45, linestyle=":",
                            label=f"Ours v1 = {r['v1']['tp_real']:.0f}")
-            if "eb_khat" in r:
-                ax.axhline(r["eb_khat"]["tp_real"], color=C_EB, linewidth=1.2,
+            if "eb" in r:
+                ax.axhline(r["eb"]["tp_real"], color=C_EB, linewidth=1.2,
                            alpha=0.45, linestyle=":",
-                           label=f"Ours EB(k̂*) = {r['eb_khat']['tp_real']:.0f}")
+                           label=f"Ours EB(k̂*) = {r['eb']['tp_real']:.0f}")
         ax.set_ylabel(scen_label, fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.legend(fontsize=7, loc="best")
@@ -168,7 +168,7 @@ def main() -> None:
     for scen_key, paper_key, label in SCENARIOS:
         ptp = paper["workloads"][paper_key]["throughput"]
         rv1 = repro.get(scen_key, {}).get("v1", {}).get("tp_real", float("nan"))
-        reb = repro.get(scen_key, {}).get("eb_khat", {}).get("tp_real", float("nan"))
+        reb = repro.get(scen_key, {}).get("eb", {}).get("tp_real", float("nan"))
         print(f"{scen_key:<18} {ptp['v1']:>10.0f} {ptp['ours']:>10.0f} "
               f"{rv1:>10.0f} {reb:>10.0f}")
 

@@ -30,7 +30,6 @@ INPUT_LEN=${INPUT_LEN:-512}
 OUTPUT_LEN=${OUTPUT_LEN:-256}
 OUTPUT_VARIANCE=${OUTPUT_VARIANCE:-0.25}
 SOURCE_DATASET=${SOURCE_DATASET:-"alpaca"}
-K_RATIO=${K_RATIO:-0.8}
 PORT=${PORT:-13000}
 SKIP_DISAGG=${SKIP_DISAGG:-0}
 DISAGG_BASE_PORT=${DISAGG_BASE_PORT:-9000}
@@ -105,10 +104,12 @@ run_dp4_bench() {
         wait_for_gpu_memory $gpu 60 || return 1
     done
 
+    # ebplus = EB⁺ (auto MB↔EB switch) with IFR adaptive (k̂*, N̂*),
+    # matching the camera-ready paper.
     local env_prefix="CUDA_VISIBLE_DEVICES=${ALL_GPUS}"
     case "$scheduler" in
-        pd_auto)
-            env_prefix="$env_prefix VLLM_PD_SCHEDULER_MODE=auto VLLM_PD_K_MODE=ratio VLLM_PD_K_RATIO=$K_RATIO VLLM_PD_CALIBRATION_FILE=$VLLM_PD_CALIBRATION_FILE"
+        ebplus)
+            env_prefix="$env_prefix VLLM_PD_SCHEDULER_MODE=auto VLLM_PD_K_MODE=ifr VLLM_PD_AUTO_COMPUTE_N=1 VLLM_PD_OOM_TOLERANCE=0.01 VLLM_PD_CALIBRATION_FILE=$VLLM_PD_CALIBRATION_FILE"
             ;;
     esac
 
@@ -303,8 +304,8 @@ if [ "$SKIP_DISAGG" != "1" ]; then
     run_disagg_bench 3 1 "bench_disagg_3P1D.json" || echo "Warning: disagg 3P+1D failed"
 fi
 
-run_dp4_bench "baseline" "bench_baseline.json" || echo "Warning: baseline failed"
-run_dp4_bench "pd_auto" "bench_pd_auto.json" || echo "Warning: pd_auto failed"
+run_dp4_bench "v1" "bench_v1.json" || echo "Warning: v1 failed"
+run_dp4_bench "ebplus" "bench_ebplus.json" || echo "Warning: ebplus failed"
 
 # ========================================
 # Summarize results

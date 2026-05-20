@@ -37,9 +37,9 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-SCHEDULERS = ["v0", "v1", "eb_khat"]
-SCHEDULER_LABELS = {"v0": "v0", "v1": "v1", "eb_khat": "EB(k̂*)"}
-COLORS = {"v0": "tab:gray", "v1": "tab:red", "eb_khat": "tab:blue"}
+SCHEDULERS = ["v0", "v1", "eb"]
+SCHEDULER_LABELS = {"v0": "v0", "v1": "v1", "eb": "EB(k̂*)"}
+COLORS = {"v0": "tab:gray", "v1": "tab:red", "eb": "tab:blue"}
 
 
 def demo_data() -> list[tuple[str, dict]]:
@@ -58,7 +58,7 @@ def demo_data() -> list[tuple[str, dict]]:
                     "mean_ttft_ms": 29100,
                     "mean_tpot_ms": 358.04,
                 },
-                "eb_khat": {
+                "eb": {
                     "throughput": 16.37,
                     "mean_ttft_ms": 34790,
                     "mean_tpot_ms": 188.45,
@@ -78,7 +78,7 @@ def demo_data() -> list[tuple[str, dict]]:
                     "mean_ttft_ms": 41900,
                     "mean_tpot_ms": 221.10,
                 },
-                "eb_khat": {
+                "eb": {
                     "throughput": 14.39,
                     "mean_ttft_ms": 55260,
                     "mean_tpot_ms": 178.30,
@@ -98,7 +98,7 @@ def demo_data() -> list[tuple[str, dict]]:
                     "mean_ttft_ms": 41880,
                     "mean_tpot_ms": 168.90,
                 },
-                "eb_khat": {
+                "eb": {
                     "throughput": 14.19,
                     "mean_ttft_ms": 22550,
                     "mean_tpot_ms": 125.91,
@@ -118,7 +118,7 @@ def demo_data() -> list[tuple[str, dict]]:
                     "mean_ttft_ms": 44200,
                     "mean_tpot_ms": 198.70,
                 },
-                "eb_khat": {
+                "eb": {
                     "throughput": 13.75,
                     "mean_ttft_ms": 42100,
                     "mean_tpot_ms": 165.54,

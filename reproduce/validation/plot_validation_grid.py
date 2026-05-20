@@ -8,11 +8,11 @@ A 3x3 grid:
 
 INPUT CSV (consumed):
   validation_summary.csv, produced by
-    reproduce/validation/ or synthetic_e2e/ or eb_plus/traffic/analyze_cfr_validation.py outputs/controller_validation/<GPU>_<MODEL>
+    reproduce/validation/ or synthetic_e2e/ or eb_plus/traffic/analyze_validation.py outputs/controller_validation/<GPU>_<MODEL>
 
   Required columns (per row = one bench result):
     scenario          (decode_heavy / balanced / prefill_heavy)
-    scheduler         (v1 / eb_khat / eb_fixed_k_<N> / ...)
+    scheduler         (v1 / eb / eb_fixed_k_<N> / ...)
     k_hat_final       (the realised switching threshold)
     tp_real           (request throughput, requests/s)
     mean_tpot_ms      (mean TPOT in ms)
@@ -20,8 +20,8 @@ INPUT CSV (consumed):
     completed         (request count, for sanity)
 
 REPRODUCTION:
-  1. ./run_validation_cfr.sh                                 (generates data)
-  2. python analyze_cfr_validation.py outputs/.../<GPU>_<MODEL>   (generates CSV)
+  1. ./run_validation.sh                                 (generates data)
+  2. python analyze_validation.py outputs/.../<GPU>_<MODEL>   (generates CSV)
   3. python plot_validation_grid.py outputs/.../<GPU>_<MODEL>/validation_summary.csv
 
 If the CSV is missing, pass --demo to render with synthetic data.
@@ -97,7 +97,7 @@ def demo_rows() -> list[dict]:
         })
         # EB(k_hat) — adaptive
         rows.append({
-            "scenario": scen, "scheduler": "eb_khat",
+            "scenario": scen, "scheduler": "eb",
             "k_hat_final": 16.0 if scen == "decode_heavy" else 32.0 if scen == "balanced" else 64.0,
             "tp_real": (6.7 if scen == "decode_heavy"
                         else 9.0 if scen == "balanced" else 12.6),
@@ -132,7 +132,7 @@ def plot(rows: list[dict], output: Path, title_suffix: str = "") -> None:
                 ax.axhline(v1_val, color="tab:red", linestyle="-", linewidth=1.5,
                            label="v1 (mixed)")
             # EB(k̂*)
-            eb_rows = [r for r in rows if r["scenario"] == scen and r["scheduler"] == "eb_khat"]
+            eb_rows = [r for r in rows if r["scenario"] == scen and r["scheduler"] == "eb"]
             if eb_rows:
                 eb_val = eb_rows[0].get(mkey, np.nan)
                 ax.axhline(eb_val, color="tab:blue", linestyle="--", linewidth=1.5,
@@ -158,7 +158,7 @@ def plot(rows: list[dict], output: Path, title_suffix: str = "") -> None:
 def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("csv", nargs="?",
-                   help="validation_summary.csv (from analyze_cfr_validation.py)")
+                   help="validation_summary.csv (from analyze_validation.py)")
     p.add_argument("--demo", action="store_true",
                    help="Render with synthetic data (no CSV needed)")
     p.add_argument("--output", default="validation_grid.pdf")
@@ -166,7 +166,7 @@ def main() -> None:
 
     if args.demo or not args.csv or not Path(args.csv).exists():
         rows = demo_rows()
-        suffix = "(DEMO data — replace with validation_summary.csv from analyze_cfr_validation.py)"
+        suffix = "(DEMO data — replace with validation_summary.csv from analyze_validation.py)"
     else:
         rows = load_csv(Path(args.csv))
         suffix = f"({Path(args.csv).parent.name})"

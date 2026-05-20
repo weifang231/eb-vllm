@@ -5,7 +5,7 @@ Bash and Python utilities used across the per-section experiments.
 | File | Purpose |
 |---|---|
 | `common.sh` | GPU auto-selection, port-availability checks, env initialisation |
-| `common_cfr.sh` | GPU model detection (`detect_gpu_name`), calibration resolver (`resolve_calibration`), scheduler env setup. Sources `common.sh` automatically. |
+| `common_eb.sh` | GPU model detection (`detect_gpu_name`), calibration resolver (`resolve_calibration`), scheduler env setup. Sources `common.sh` automatically. |
 | `dataset_utils.py` | Loaders for ShareGPT / LongBench / WildChat / NuminaMath |
 | `export_dataset.py` | Convert HF datasets to the prompt JSONL format the runner expects |
 

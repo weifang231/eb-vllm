@@ -13,7 +13,7 @@
 #   MODEL: model path, default Qwen/Qwen3-8B
 #   DATASET_PATH: WildChat dataset path
 #   CONCURRENCY_VALUES: concurrency list, e.g. "32 64 128 256 512 1024 2048"
-#   SCHEDULERS: scheduler list, e.g. "baseline pd_ratio pd_ifr"
+#   SCHEDULERS: scheduler list, e.g. "v1 eb_kratio eb"
 #   K_RATIO: θ* for PD ratio mode, default 0.8
 #   SKIP_EXISTING: skip existing results, default 1
 #   GPU_TYPE: GPU type (h200/rtx_pro_6000), used to select optimal configuration
@@ -42,18 +42,18 @@ get_optimal_config() {
     # H200 WildChat optimal configurations (from paper Table)
     if [ "$gpu_type" = "h200" ]; then
         case "${model_short}|${scheduler}" in
-            # EB(1) = pd_ratio
-            "Qwen3-8B|pd_ratio")       echo "18432 1536" ;;
-            "Qwen3-30B-A3B|pd_ratio")  echo "16384 1024" ;;
-            "gemma-3-1b-it|pd_ratio")  echo "16384 1024" ;;
-            # CP = baseline
-            "Qwen3-8B|baseline")       echo "4096 2048" ;;
-            "Qwen3-30B-A3B|baseline")  echo "4096 1536" ;;
-            "gemma-3-1b-it|baseline")  echo "18432 256" ;;
-            # EB(k̂*) = pd_ifr
-            "Qwen3-8B|pd_ifr")        echo "16384 1024" ;;
-            "Qwen3-30B-A3B|pd_ifr")   echo "14336 1024" ;;
-            "gemma-3-1b-it|pd_ifr")   echo "18432 1536" ;;
+            # EB(1) = eb_kratio
+            "Qwen3-8B|eb_kratio")       echo "18432 1536" ;;
+            "Qwen3-30B-A3B|eb_kratio")  echo "16384 1024" ;;
+            "gemma-3-1b-it|eb_kratio")  echo "16384 1024" ;;
+            # CP = v1
+            "Qwen3-8B|v1")       echo "4096 2048" ;;
+            "Qwen3-30B-A3B|v1")  echo "4096 1536" ;;
+            "gemma-3-1b-it|v1")  echo "18432 256" ;;
+            # EB(k̂*) = eb
+            "Qwen3-8B|eb")        echo "16384 1024" ;;
+            "Qwen3-30B-A3B|eb")   echo "14336 1024" ;;
+            "gemma-3-1b-it|eb")   echo "18432 1536" ;;
             *)
                 echo "Error: unknown configuration gpu=${gpu_type} model=${model_short} scheduler=${scheduler}" >&2
                 return 1
@@ -62,18 +62,18 @@ get_optimal_config() {
     elif [ "$gpu_type" = "rtx_pro_6000" ] || [ "$gpu_type" = "a6000" ]; then
         # RTX PRO 6000 / A6000 WildChat optimal configurations (from paper Table)
         case "${model_short}|${scheduler}" in
-            # EB(1) = pd_ratio
-            "Qwen3-8B|pd_ratio")       echo "18432 1024" ;;
-            "Qwen3-30B-A3B|pd_ratio")  echo "10240 512" ;;
-            "gemma-3-1b-it|pd_ratio")  echo "14336 1536" ;;
-            # CP = baseline
-            "Qwen3-8B|baseline")       echo "18432 1024" ;;
-            "Qwen3-30B-A3B|baseline")  echo "14336 1024" ;;
-            "gemma-3-1b-it|baseline")  echo "8192 256" ;;
-            # EB(k̂*) = pd_ifr
-            "Qwen3-8B|pd_ifr")        echo "10240 1024" ;;
-            "Qwen3-30B-A3B|pd_ifr")   echo "18432 512" ;;
-            "gemma-3-1b-it|pd_ifr")   echo "14336 2048" ;;
+            # EB(1) = eb_kratio
+            "Qwen3-8B|eb_kratio")       echo "18432 1024" ;;
+            "Qwen3-30B-A3B|eb_kratio")  echo "10240 512" ;;
+            "gemma-3-1b-it|eb_kratio")  echo "14336 1536" ;;
+            # CP = v1
+            "Qwen3-8B|v1")       echo "18432 1024" ;;
+            "Qwen3-30B-A3B|v1")  echo "14336 1024" ;;
+            "gemma-3-1b-it|v1")  echo "8192 256" ;;
+            # EB(k̂*) = eb
+            "Qwen3-8B|eb")        echo "10240 1024" ;;
+            "Qwen3-30B-A3B|eb")   echo "18432 512" ;;
+            "gemma-3-1b-it|eb")   echo "14336 2048" ;;
             *)
                 echo "Error: unknown configuration gpu=${gpu_type} model=${model_short} scheduler=${scheduler}" >&2
                 return 1
@@ -114,7 +114,7 @@ LIMIT_MAX_TOKENS=${LIMIT_MAX_TOKENS:-256}
 REQUEST_TIMEOUT=${REQUEST_TIMEOUT:-120}
 K_RATIO=${K_RATIO:-0.8}
 BASE_PORT=${BASE_PORT:-12000}
-SCHEDULERS=${SCHEDULERS:-"baseline pd_ratio pd_ifr"}
+SCHEDULERS=${SCHEDULERS:-"v1 eb_kratio eb"}
 
 # Hardware calibration file
 if [ -z "${VLLM_PD_CALIBRATION_FILE:-}" ]; then
@@ -254,20 +254,17 @@ run_experiment() {
     export VLLM_COLLECT_SCHEDULE_STATS=1
 
     case "$scheduler" in
-        baseline)
+        v1)
             export VLLM_USE_PD_SCHEDULER=0
-            unset VLLM_PD_K_MODE VLLM_PD_K_STAR VLLM_PD_K_RATIO
             ;;
-        pd_ratio)
+        eb_kratio)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=ratio
             export VLLM_PD_K_RATIO=$K_RATIO
-            unset VLLM_PD_K_STAR
             ;;
-        pd_ifr)
+        eb)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=ifr
-            unset VLLM_PD_K_RATIO VLLM_PD_K_STAR
             ;;
     esac
 

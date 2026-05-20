@@ -25,7 +25,6 @@ OUTPUT_VARIANCE=${OUTPUT_VARIANCE:-0.25}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:-8}
 NUM_PROMPTS=${NUM_PROMPTS:-32}
 PORT=${PORT:-13100}
-K_RATIO=${K_RATIO:-0.8}
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.9}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-40960}
 
@@ -92,14 +91,16 @@ run_bench() {
     lsof -t -i:$PORT 2>/dev/null | xargs -r kill -9 2>/dev/null
     wait_for_gpu_memory $GPU_ID 60 || return 1
 
-    # Build env prefix
+    # Build env prefix.
+    # eb        = EB(k̂*), ebplus = EB⁺. Both use the IFR adaptive
+    # controller (camera-ready paper) with online (k̂*, N̂*) tracking.
     local env_prefix="CUDA_VISIBLE_DEVICES=${GPU_ID}"
     case "$scheduler" in
-        theta_eb)
-            env_prefix="$env_prefix VLLM_PD_SCHEDULER_MODE=eb VLLM_PD_K_MODE=ratio VLLM_PD_K_RATIO=$K_RATIO VLLM_PD_CALIBRATION_FILE=$VLLM_PD_CALIBRATION_FILE"
+        eb)
+            env_prefix="$env_prefix VLLM_PD_SCHEDULER_MODE=eb VLLM_PD_K_MODE=ifr VLLM_PD_AUTO_COMPUTE_N=1 VLLM_PD_OOM_TOLERANCE=0.01 VLLM_PD_CALIBRATION_FILE=$VLLM_PD_CALIBRATION_FILE"
             ;;
-        theta_plus)
-            env_prefix="$env_prefix VLLM_PD_SCHEDULER_MODE=auto VLLM_PD_K_MODE=ratio VLLM_PD_K_RATIO=$K_RATIO VLLM_PD_CALIBRATION_FILE=$VLLM_PD_CALIBRATION_FILE"
+        ebplus)
+            env_prefix="$env_prefix VLLM_PD_SCHEDULER_MODE=auto VLLM_PD_K_MODE=ifr VLLM_PD_AUTO_COMPUTE_N=1 VLLM_PD_OOM_TOLERANCE=0.01 VLLM_PD_CALIBRATION_FILE=$VLLM_PD_CALIBRATION_FILE"
             ;;
         # cp: no PD env vars, uses default chunked prefill
     esac
@@ -132,8 +133,8 @@ run_bench() {
 # ========================================
 # Run all three schedulers
 # ========================================
-SCHEDULERS=("cp" "theta_eb" "theta_plus")
-RESULT_FILES=("bench_cp.json" "bench_theta_eb.json" "bench_theta_plus.json")
+SCHEDULERS=("v1" "eb" "ebplus")
+RESULT_FILES=("bench_v1.json" "bench_eb.json" "bench_ebplus.json")
 
 for i in "${!SCHEDULERS[@]}"; do
     run_bench "${SCHEDULERS[$i]}" "${RESULT_FILES[$i]}" || echo "WARN: ${SCHEDULERS[$i]} failed"

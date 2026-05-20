@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Multi-turn conversation benchmark script (prefix cache test)
-# Compares baseline and PD scheduler on multi-turn workloads
+# Compares v1 and EB scheduler on multi-turn workloads
 #
 # Usage: ./run_benchmark.sh <DATASET_PATH> [MAX_GPUS]
 #
@@ -144,11 +144,11 @@ echo "  DTYPE: ${DTYPE:-auto}"
 echo "  NUM_CLIENTS: $NUM_CLIENTS"
 echo "  MAX_TURNS: $MAX_TURNS"
 echo "  LIMIT_MAX_TOKENS: $LIMIT_MAX_TOKENS"
-echo "  K_RATIO (for pd_ratio): $K_RATIO"
+echo "  K_RATIO (for eb_kratio): $K_RATIO"
 echo "  BS_VALUES: ${BS_VALUES[*]}"
 echo "  TB_VALUES: ${TB_VALUES[*]}"
 # Supports specifying which schedulers to run via the SCHEDULERS env var
-SCHEDULERS=${SCHEDULERS:-"baseline pd_ratio pd_ifr"}
+SCHEDULERS=${SCHEDULERS:-"v1 eb_kratio eb"}
 echo "  SCHEDULERS: $SCHEDULERS"
 echo "  CALIBRATION_FILE: ${VLLM_PD_CALIBRATION_FILE:-"(not set)"}"
 echo ""
@@ -191,9 +191,10 @@ cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
     "tb_values": [$(echo "${TB_VALUES[*]}" | sed 's/ /, /g')],
     "schedulers": [$(echo "$SCHEDULERS" | sed 's/[^ ]*/"&"/g' | sed 's/ /, /g')],
     "scheduler_descriptions": {
-        "baseline": "vLLM default scheduler",
-        "pd_ratio": "PD scheduler with ratio mode (θ*=${K_RATIO})",
-        "pd_ifr": "PD scheduler with IFR mode (adaptive θ* based on hazard rate)"
+        "v1": "vLLM v1 mixed-batching baseline",
+        "eb_kratio": "EB ablation: fixed θ*=${K_RATIO} (K_MODE=ratio)",
+        "eb": "EB(k̂*) adaptive IFR controller",
+        "ebplus": "EB+ online MB↔EB switching"
     },
     "calibration_file": "${VLLM_PD_CALIBRATION_FILE:-null}",
     "calibration_params": {
@@ -340,27 +341,23 @@ run_experiment() {
     export VLLM_COLLECT_SCHEDULE_STATS=1
 
     case "$scheduler" in
-        baseline)
+        v1)
             export VLLM_USE_PD_SCHEDULER=0
-            unset VLLM_PD_K_MODE VLLM_PD_K_STAR VLLM_PD_K_RATIO
             ;;
-        pd_ratio)
+        eb_kratio)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=ratio
             export VLLM_PD_K_RATIO=$K_RATIO
-            unset VLLM_PD_K_STAR
             ;;
-        pd_ifr)
+        eb)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=ifr
-            unset VLLM_PD_K_RATIO VLLM_PD_K_STAR
             ;;
-        pd_auto)
+        ebplus)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_SCHEDULER_MODE=auto
             export VLLM_PD_K_MODE=ifr
             export VLLM_PD_IFR_WINDOW_SIZE=${VLLM_PD_IFR_WINDOW_SIZE:-500}
-            unset VLLM_PD_K_RATIO VLLM_PD_K_STAR
             ;;
     esac
 

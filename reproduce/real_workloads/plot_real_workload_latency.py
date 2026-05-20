@@ -13,7 +13,7 @@ INPUT (consumed):
       "<workload>": {
         "v0":  {"throughput": ..., "mean_ttft_ms": ..., "mean_tpot_ms": ...},
         "v1":  {...},
-        "eb_khat": {...}
+        "eb": {...}
       },
       ...
     }
@@ -42,9 +42,9 @@ import numpy as np
 
 
 WORKLOADS = ["ShareGPT", "LongBench", "WildChat", "NuminaMath"]
-SCHEDULERS = ["v0", "v1", "eb_khat"]
-SCHEDULER_LABELS = {"v0": "v0", "v1": "v1", "eb_khat": "EB(k̂*)"}
-COLORS = {"v0": "tab:gray", "v1": "tab:red", "eb_khat": "tab:blue"}
+SCHEDULERS = ["v0", "v1", "eb"]
+SCHEDULER_LABELS = {"v0": "v0", "v1": "v1", "eb": "EB(k̂*)"}
+COLORS = {"v0": "tab:gray", "v1": "tab:red", "eb": "tab:blue"}
 
 
 def load_optimal(path: Path) -> dict:
@@ -57,16 +57,16 @@ def demo_data() -> dict:
     return {
         "ShareGPT":   {"v0": {"mean_ttft_ms": 12000, "mean_tpot_ms": 220},
                        "v1": {"mean_ttft_ms": 14500, "mean_tpot_ms": 269},
-                       "eb_khat": {"mean_ttft_ms": 18500, "mean_tpot_ms": 94}},
+                       "eb": {"mean_ttft_ms": 18500, "mean_tpot_ms": 94}},
         "LongBench":  {"v0": {"mean_ttft_ms": 180000, "mean_tpot_ms": 64},
                        "v1": {"mean_ttft_ms": 176000, "mean_tpot_ms": 58},
-                       "eb_khat": {"mean_ttft_ms": 170000, "mean_tpot_ms": 67}},
+                       "eb": {"mean_ttft_ms": 170000, "mean_tpot_ms": 67}},
         "WildChat":   {"v0": {"mean_ttft_ms": 22000, "mean_tpot_ms": 195},
                        "v1": {"mean_ttft_ms": 25000, "mean_tpot_ms": 173},
-                       "eb_khat": {"mean_ttft_ms": 30000, "mean_tpot_ms": 113}},
+                       "eb": {"mean_ttft_ms": 30000, "mean_tpot_ms": 113}},
         "NuminaMath": {"v0": {"mean_ttft_ms": 3000, "mean_tpot_ms": 75},
                        "v1": {"mean_ttft_ms": 4000, "mean_tpot_ms": 82},
-                       "eb_khat": {"mean_ttft_ms": 4500, "mean_tpot_ms": 65}},
+                       "eb": {"mean_ttft_ms": 4500, "mean_tpot_ms": 65}},
     }
 
 

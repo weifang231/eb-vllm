@@ -68,6 +68,6 @@ echo "    -v ~/.cache/huggingface:/root/.cache/huggingface \\"
 echo "    $EXP_IMAGE bash"
 echo ""
 echo "Then inside container:"
-echo '  SCHEDULERS="v1,eb_khat,ada" \'
+echo '  SCHEDULERS="v1,eb,ebplus" \'
 echo '  CONCURRENCY_PHASES="32:4000" \'
 echo '  bash reproduce/eb_plus/non_stationary/run_concurrency_shift.sh 0'

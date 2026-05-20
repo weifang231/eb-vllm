@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # TB × BS grid search script (real dataset version)
-# Compares baseline and PD scheduler across all (TB, BS) combinations
+# Compares v1 and EB scheduler across all (TB, BS) combinations
 #
 # Usage: ./run_grid_search_real.sh <DATASET_PATH> [MAX_GPUS]
 #
@@ -105,15 +105,15 @@ echo "  NUM_PROMPTS: $NUM_PROMPTS"
 echo "  MAX_CONCURRENCY: $MAX_CONCURRENCY"
 echo "  CUSTOM_OUTPUT_LEN: $CUSTOM_OUTPUT_LEN"
 echo "  ENABLE_THINKING: $ENABLE_THINKING"
-echo "  K_RATIO (for pd_ratio): $K_RATIO"
+echo "  K_RATIO (for eb_kratio): $K_RATIO"
 echo "  BS_VALUES: ${BS_VALUES[*]}"
 echo "  TB_VALUES: ${TB_VALUES[*]}"
 # Supports specifying which schedulers to run via the SCHEDULERS env var
-# e.g. SCHEDULERS="pd_ifr" runs only pd_ifr mode
-SCHEDULERS=${SCHEDULERS:-"baseline pd_ratio pd_ifr"}
+# e.g. SCHEDULERS="eb" runs only eb (EB(k̂*)) mode
+SCHEDULERS=${SCHEDULERS:-"v1 eb_kratio eb"}
 echo "  SCHEDULERS: $SCHEDULERS"
 # Supports a version suffix for repeated runs of the same scheduler producing different result files
-# e.g. VERSION=1 SCHEDULERS="pd_ifr" produces bench_pd_ifr_1.json
+# e.g. VERSION=1 SCHEDULERS="eb" produces bench_eb_1.json
 if [ -n "${VERSION:-}" ]; then
     echo "  VERSION: ${VERSION} (file suffix: _${VERSION})"
 fi
@@ -157,9 +157,10 @@ cat > "${OUTPUT_DIR}/experiment_config.json" << EOF
     "tb_values": [$(echo "${TB_VALUES[*]}" | sed 's/ /, /g')],
     "schedulers": [$(echo "$SCHEDULERS" | sed 's/[^ ]*/"&"/g' | sed 's/ /, /g')],
     "scheduler_descriptions": {
-        "baseline": "vLLM default scheduler",
-        "pd_ratio": "PD scheduler with ratio mode (θ*=${K_RATIO})",
-        "pd_ifr": "PD scheduler with IFR mode (adaptive θ* based on hazard rate)"
+        "v1": "vLLM v1 mixed-batching baseline",
+        "eb_kratio": "EB ablation: fixed θ*=${K_RATIO} (K_MODE=ratio)",
+        "eb": "EB(k̂*) adaptive IFR controller",
+        "ebplus": "EB+ online MB↔EB switching"
     },
     "calibration_file": "${VLLM_PD_CALIBRATION_FILE:-null}",
     "calibration_params": {
@@ -187,7 +188,7 @@ run_experiment() {
         echo "[GPU $gpu_id] Port $preferred_port is in use, switching to $port"
     fi
     local result_dir="${OUTPUT_DIR}/tb${tb}/bs${bs}"
-    # Version suffix support: VERSION=1 produces pd_ifr_1.log, bench_pd_ifr_1.json, etc.
+    # Version suffix support: VERSION=1 produces eb_1.log, bench_eb_1.json, etc.
     local suffix=""
     if [ -n "${VERSION:-}" ]; then
         suffix="_${VERSION}"
@@ -211,20 +212,17 @@ run_experiment() {
     export VLLM_COLLECT_SCHEDULE_STATS=1
 
     case "$scheduler" in
-        baseline)
+        v1)
             export VLLM_USE_PD_SCHEDULER=0
-            unset VLLM_PD_K_MODE VLLM_PD_K_STAR VLLM_PD_K_RATIO
             ;;
-        pd_ratio)
+        eb_kratio)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=ratio
             export VLLM_PD_K_RATIO=$K_RATIO
-            unset VLLM_PD_K_STAR
             ;;
-        pd_ifr)
+        eb)
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_K_MODE=ifr
-            unset VLLM_PD_K_RATIO VLLM_PD_K_STAR
             ;;
     esac
 
