@@ -86,13 +86,15 @@ echo "========================================"
 echo "ALL MODELS COMPLETE - SUMMARY"
 echo "========================================"
 printf "%-20s %12s %12s %12s %12s %12s %12s\n" \
-    "Model" "CP tp" "EB tp" "CP TTFT" "EB TTFT" "CP TPOT" "EB TPOT"
+    "Model" "v1 tp" "EB tp" "v1 TTFT" "EB TTFT" "v1 TPOT" "EB TPOT"
 echo "-----------------------------------------------------------------------------------------------------------"
 
 for job in "${JOBS[@]}"; do
     IFS='|' read -r name model_path gpu_id max_conc max_model_len port calib_name <<< "$job"
 
-    # Find the output directory for this model
+    # Find the output directory for this model. run_long_context_comparison.sh
+    # writes long_context_${model_short}_i${INPUT_LEN}_o${OUTPUT_LEN}_c${MAX_CONCURRENCY}_<ts>;
+    # the trailing _* glob covers the c${MAX_CONCURRENCY}_<timestamp> suffix.
     model_short=$(echo "$model_path" | sed 's|.*/||')
     result_dir=$(ls -td ${SCRIPT_DIR}/../outputs/long_context_${model_short}_i${INPUT_LEN}_o${OUTPUT_LEN}_* 2>/dev/null | head -1)
 
@@ -101,18 +103,23 @@ for job in "${JOBS[@]}"; do
         continue
     fi
 
-    cp_file="$result_dir/bench_cp.json"
-    eb_file="$result_dir/bench_theta_eb.json"
+    # run_long_context_comparison.sh produces bench_v1.json / bench_eb.json
+    # (an older revision used bench_cp.json / bench_theta_eb.json — keep the
+    # legacy names as fallbacks so historical result dirs still summarise).
+    v1_file="$result_dir/bench_v1.json"
+    [ -f "$v1_file" ] || v1_file="$result_dir/bench_cp.json"
+    eb_file="$result_dir/bench_eb.json"
+    [ -f "$eb_file" ] || eb_file="$result_dir/bench_theta_eb.json"
 
-    if [ -f "$cp_file" ] && [ -f "$eb_file" ]; then
-        cp_tp=$(python3 -c "import json; d=json.load(open('$cp_file')); print(f\"{d.get('total_token_throughput',0):.0f}\")")
+    if [ -f "$v1_file" ] && [ -f "$eb_file" ]; then
+        v1_tp=$(python3 -c "import json; d=json.load(open('$v1_file')); print(f\"{d.get('total_token_throughput',0):.0f}\")")
         eb_tp=$(python3 -c "import json; d=json.load(open('$eb_file')); print(f\"{d.get('total_token_throughput',0):.0f}\")")
-        cp_ttft=$(python3 -c "import json; d=json.load(open('$cp_file')); print(f\"{d.get('mean_ttft_ms',0):.0f}\")")
+        v1_ttft=$(python3 -c "import json; d=json.load(open('$v1_file')); print(f\"{d.get('mean_ttft_ms',0):.0f}\")")
         eb_ttft=$(python3 -c "import json; d=json.load(open('$eb_file')); print(f\"{d.get('mean_ttft_ms',0):.0f}\")")
-        cp_tpot=$(python3 -c "import json; d=json.load(open('$cp_file')); print(f\"{d.get('mean_tpot_ms',0):.0f}\")")
+        v1_tpot=$(python3 -c "import json; d=json.load(open('$v1_file')); print(f\"{d.get('mean_tpot_ms',0):.0f}\")")
         eb_tpot=$(python3 -c "import json; d=json.load(open('$eb_file')); print(f\"{d.get('mean_tpot_ms',0):.0f}\")")
         printf "%-20s %12s %12s %12s %12s %12s %12s\n" \
-            "$name" "$cp_tp" "$eb_tp" "$cp_ttft" "$eb_ttft" "$cp_tpot" "$eb_tpot"
+            "$name" "$v1_tp" "$eb_tp" "$v1_ttft" "$eb_ttft" "$v1_tpot" "$eb_tpot"
     else
         printf "%-20s %12s\n" "$name" "FAILED"
     fi
