@@ -7,8 +7,8 @@
     "c (s/tok)": 9.8989734316548e-06
   },
   "env_vars_for_pd_auto": {
-    "VLLM_PD_CP_COST_A": "6.293427e-05",
-    "VLLM_PD_CP_COST_B": "1.968926e-04",
-    "VLLM_PD_CP_COST_C": "9.898973e-06"
+    "VLLM_PD_MB_COST_A": "6.293427e-05",
+    "VLLM_PD_MB_COST_B": "1.968926e-04",
+    "VLLM_PD_MB_COST_C": "9.898973e-06"
   }
 }

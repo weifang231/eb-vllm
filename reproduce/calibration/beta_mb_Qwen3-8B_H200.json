@@ -14,9 +14,9 @@
     "c (s/tok)": 1.478e-05
   },
   "env_vars_for_pd_auto": {
-    "VLLM_PD_CP_COST_A": "2.493675e-05",
-    "VLLM_PD_CP_COST_B": "5.192856e-05",
-    "VLLM_PD_CP_COST_C": "1.477785e-05"
+    "VLLM_PD_MB_COST_A": "2.493675e-05",
+    "VLLM_PD_MB_COST_B": "5.192856e-05",
+    "VLLM_PD_MB_COST_C": "1.477785e-05"
   },
   "timestamp": "2026-05-16"
 }
