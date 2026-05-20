@@ -200,7 +200,7 @@ run_experiment() {
     vllm bench serve \
         --model "$MODEL" \
         --base-url "http://localhost:${port}" \
-        --dataset-name "${DATASET_NAME:-random}" \
+        --dataset-name "${DATASET_NAME:-geometric_random}" \
         --random-input-len "$INPUT_LEN" \
         --random-output-len "$OUTPUT_LEN" \
         --random-range-ratio "$RANDOM_RANGE_RATIO" \

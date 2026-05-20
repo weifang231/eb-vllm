@@ -12,11 +12,15 @@ git clone https://github.com/weifang231/eb-vllm
 cd eb-vllm
 # `main` is the default branch and tracks the camera-ready snapshot.
 # For the exact reviewed code, also: `git checkout v-icml2026-cr-rc1`
-python -m venv .venv && source .venv/bin/activate     # OR: conda create -n eb python=3.12
-pip install torch                                       # match your CUDA
-VLLM_USE_PRECOMPILED=1 pip install -e . --no-build-isolation
-                                # ~30 s; fetches all 8 .so (incl. FA3) from
-                                # the official vLLM wheel — see warning below
+
+# Install eb-vllm — see REPRODUCE.md §0 for the canonical recipe
+# (~30 min source build, end-to-end verified on H200). The
+# precompiled-wheel path is fragile due to upstream wheel ABI drift;
+# REPRODUCE.md §0.1 walks through each prerequisite (torch index-url,
+# CUDA_HOME, SETUPTOOLS_SCM_PRETEND_VERSION) that the one-liner here
+# would otherwise hide.
+
+# After install, fetch reproduction-only Python deps:
 pip install -r requirements/reproduce.txt              # datasets, aiohttp, quart, matplotlib, pandas, scipy
 
 # 2. Download ShareGPT (other datasets auto-download from HF on first use)
@@ -52,15 +56,6 @@ GPUS=0,1 SCHEDULERS="v1 eb" MODEL=Qwen/Qwen3-8B \
 # 6. Analyze / plot
 python analyze_grid_search.py ../outputs/optimal_only_sharegpt_prompts_Qwen3-8B_*
 ```
-
-> **⚠ Do NOT drop `VLLM_USE_PRECOMPILED=1`.** A locally-compiled
-> `vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so` causes a ~10× throughput
-> regression (measured H200 + Qwen3-8B ShareGPT: 15.6 → 1.5 RPS, TPOT
-> 339 ms → 4158 ms). eb-vllm's diff vs upstream vLLM is **pure-Python**
-> (`vllm/v1/core/sched/` + `reproduce/`), so the upstream precompiled FA3
-> binary is ABI-compatible. Only build locally if you have modified `csrc/`,
-> and in that case overwrite `vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so`
-> with the version extracted from the official wheel afterwards.
 
 **Workload protocol** (paper §4.1 — match `IGNORE_EOS` + `CUSTOM_OUTPUT_LEN` per
 workload):
