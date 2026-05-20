@@ -37,7 +37,9 @@ K_RATIO=${K_RATIO:-0.8}
 BASE_PORT=${BASE_PORT:-13000}
 IFR_WINDOW_SIZE=${IFR_WINDOW_SIZE:-500}
 PHASES=${PHASES:-"1024:128,512:512,128:1024"}
-OUTPUT_VARIANCE=${OUTPUT_VARIANCE:-0.25}
+# Paper §4.1 spec: synthetic workloads use ±50% uniform jitter (variance=0.5).
+# Previous default 0.25 was a narrower (±25%) distribution and didn't match paper.
+OUTPUT_VARIANCE=${OUTPUT_VARIANCE:-0.5}
 SOURCE_DATASET=${SOURCE_DATASET:-"alpaca"}
 
 # Optimal configuration (H200)

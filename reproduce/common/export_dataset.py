@@ -106,6 +106,14 @@ def main():
         "--output", type=str, required=True, help="Output JSONL file path"
     )
     parser.add_argument(
+        "--output-len-cap", type=int, default=None,
+        help=(
+            "Per-prompt output length cap (truncates dataset-native output_len). "
+            "Paper §4.1 protocol: 500 for ShareGPT; recommend setting "
+            "--output-len-cap 500 when --dataset=sharegpt."
+        ),
+    )
+    parser.add_argument(
         "--apply-chat-template",
         action="store_true",
         help="Apply chat template to prompts",
@@ -164,6 +172,7 @@ def main():
         prompts, input_lengths, output_lengths = load_sharegpt_prompts(
             json_path=args.sharegpt_path,
             max_samples=args.num_samples,
+            output_len_cap=args.output_len_cap,
             tokenizer=tokenizer,
         )
     elif args.dataset == "lmsys":

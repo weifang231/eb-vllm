@@ -98,7 +98,10 @@ def load_alpaca_prompts(
 
 
 def load_sharegpt_prompts(
-    json_path: str = DEFAULT_SHAREGPT_PATH, max_samples: int = 1000, tokenizer=None
+    json_path: str = DEFAULT_SHAREGPT_PATH,
+    max_samples: int = 1000,
+    tokenizer=None,
+    output_len_cap: int | None = None,
 ) -> tuple[list[str], list[int], list[int]]:
     """
     Load prompts from ShareGPT dataset.
@@ -107,6 +110,9 @@ def load_sharegpt_prompts(
         json_path: Path to ShareGPT JSON file.
         max_samples: Maximum number of samples to load.
         tokenizer: Optional tokenizer for accurate token counting.
+        output_len_cap: Per-prompt output length cap (truncates dataset-native
+            output_len at this value). Paper §4.1 / REPRODUCE.md ShareGPT
+            protocol specifies cap ≤500. Default None = no cap.
 
     Returns:
         Tuple of (prompts, input_lengths, output_lengths).
@@ -156,6 +162,9 @@ def load_sharegpt_prompts(
                     else:
                         input_len = int(len(input_text.split()) * WORD_TO_TOKEN_RATIO)
                         output_len = int(len(output_text.split()) * WORD_TO_TOKEN_RATIO)
+
+                    if output_len_cap is not None:
+                        output_len = min(output_len, output_len_cap)
 
                     input_lengths.append(input_len)
                     output_lengths.append(output_len)

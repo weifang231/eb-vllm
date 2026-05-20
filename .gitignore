@@ -232,6 +232,7 @@ ep_kernels_workspace/
 reproduce/outputs/
 reproduce/**/outputs/
 reproduce/**/logs/
+reproduce/_logs/
 
 # Benchmark result JSONs scattered under reproduce/
 reproduce/**/bench_*.json
