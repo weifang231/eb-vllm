@@ -109,8 +109,9 @@ def main():
         "--output-len-cap", type=int, default=None,
         help=(
             "Per-prompt output length cap (truncates dataset-native output_len). "
-            "Paper §4.1 protocol: 500 for ShareGPT; recommend setting "
-            "--output-len-cap 500 when --dataset=sharegpt."
+            "Paper §4.1 protocol: 500 for ShareGPT, 4000 for NuminaMath. When "
+            "this flag is omitted, sharegpt and numina_math fall back to those "
+            "paper defaults; pass an explicit value (e.g. 0/-1) to disable."
         ),
     )
     parser.add_argument(
@@ -169,10 +170,18 @@ def main():
             max_samples=args.num_samples, tokenizer=tokenizer
         )
     elif args.dataset == "sharegpt":
+        # Paper §4.1 protocol caps ShareGPT outputs at 500 tokens. Apply that
+        # default when the user didn't override --output-len-cap explicitly;
+        # passing a non-positive value disables the cap.
+        sharegpt_cap = args.output_len_cap
+        if sharegpt_cap is None:
+            sharegpt_cap = 500
+        elif sharegpt_cap <= 0:
+            sharegpt_cap = None
         prompts, input_lengths, output_lengths = load_sharegpt_prompts(
             json_path=args.sharegpt_path,
             max_samples=args.num_samples,
-            output_len_cap=args.output_len_cap,
+            output_len_cap=sharegpt_cap,
             tokenizer=tokenizer,
         )
     elif args.dataset == "lmsys":
@@ -187,10 +196,18 @@ def main():
             step_by_step=not args.no_step_by_step,
         )
     elif args.dataset == "numina_math":
+        # Paper §4.1 protocol caps NuminaMath outputs at 4000 tokens. Apply
+        # that default when --output-len-cap is omitted; non-positive disables.
+        numina_cap = args.output_len_cap
+        if numina_cap is None:
+            numina_cap = 4000
+        elif numina_cap <= 0:
+            numina_cap = None
         prompts, input_lengths, output_lengths = load_numina_math_prompts(
             max_samples=args.num_samples,
             tokenizer=tokenizer,
             min_output_len=args.min_output_len,
+            output_len_cap=numina_cap,
             step_by_step=not args.no_step_by_step,
         )
     elif args.dataset == "longbench":

@@ -85,10 +85,16 @@ fi
 # Paper workload protocol (REPRODUCE.md §4.1 — paper-faithful per-workload
 # output-length truncation). Set per-workload defaults AFTER auto-detection.
 # Pre-existing env override still wins.
+#
+# -1 means "use the per-request output_len recorded in the JSONL"; the dataset
+# is expected to have been exported with the paper's per-workload cap baked in
+# (export_dataset.py applies --output-len-cap 500 for ShareGPT and 4000 for
+# NuminaMath by default; LongBench is forced to a constant 20 here regardless
+# of dataset content).
 case "$WORKLOAD" in
-    sharegpt)    CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;    # dataset-native, cap ≤500
+    sharegpt)    CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;    # dataset-native, cap ≤500 (export-time)
     longbench)   CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-20} ;;    # forced short output
-    numina_math) CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-4000} ;;  # forced full chain-of-thought
+    numina_math) CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;    # dataset-native, cap ≤4000 (export-time)
     wildchat)    CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;    # dataset-native; multi-turn path normally handles this
 esac
 IGNORE_EOS=${IGNORE_EOS:-true}

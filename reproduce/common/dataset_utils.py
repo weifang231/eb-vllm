@@ -413,6 +413,7 @@ def load_numina_math_prompts(
     max_samples: int = 1000,
     tokenizer=None,
     min_output_len: int = 0,
+    output_len_cap: int | None = None,
     step_by_step: bool = True,
 ) -> tuple[list[str], list[int], list[int]]:
     """
@@ -425,6 +426,9 @@ def load_numina_math_prompts(
         max_samples: Maximum number of samples to load.
         tokenizer: Optional tokenizer for accurate token counting.
         min_output_len: Minimum output length in tokens (filter shorter samples).
+        output_len_cap: Per-prompt output length cap (truncates dataset-native
+            output_len at this value). Paper §4.1 protocol caps NuminaMath at
+            4000 tokens. Default None = no cap.
         step_by_step: If True, append "Please think step by step." to prompts.
 
     Returns:
@@ -481,6 +485,9 @@ def load_numina_math_prompts(
         if output_len < min_output_len:
             filtered_count += 1
             continue
+
+        if output_len_cap is not None:
+            output_len = min(output_len, output_len_cap)
 
         prompts.append(input_text)
         input_lengths.append(input_len)

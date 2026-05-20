@@ -77,12 +77,22 @@ K_RATIO=${K_RATIO:-0.8}
 BASE_PORT=${BASE_PORT:-11000}
 # Workload-aware CUSTOM_OUTPUT_LEN (REPRODUCE.md §4.1 protocol).
 # Auto-detect from dataset basename; pre-existing env override still wins.
+# Paper §4.1 protocol per-request output length:
+#   sharegpt:    natural distribution capped ≤500 (cap applied at export time
+#                via export_dataset.py's --output-len-cap, default 500)
+#   numina_math: natural distribution capped ≤4000 (cap applied at export time)
+#   longbench:   forced short output (20 tokens)
+#   wildchat:    multi-turn; per-turn dataset-native
+# All three "dataset-native" workloads run with IGNORE_EOS=true so each request
+# is held to its recorded per-prompt output_len. -1 below means "use the
+# output_len column from the JSONL"; do NOT replace with a constant or every
+# request would be forced to the same length.
 case "${DATASET_NAME}" in
     sharegpt*)   CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;
     longbench*)  CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-20} ;;
     wildchat*)   CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;
-    numina*)     CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-4000} ;;
-    *)           CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:-4000} ;;
+    numina*)     CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;
+    *)           CUSTOM_OUTPUT_LEN=${CUSTOM_OUTPUT_LEN:--1} ;;
 esac
 IGNORE_EOS=${IGNORE_EOS:-true}
 ENABLE_THINKING=${ENABLE_THINKING:-true}  # controls Qwen3 thinking mode
