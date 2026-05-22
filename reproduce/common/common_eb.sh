@@ -152,8 +152,10 @@ set_scheduler_env() {
             export VLLM_USE_PD_SCHEDULER=0
             ;;
         eb)
+            # Journal version: EB(k̂) uses midpoint construction
+            # (Algorithm midpoint, K_MODE=cfr). ICML used K_MODE=ifr.
             export VLLM_USE_PD_SCHEDULER=1
-            export VLLM_PD_K_MODE=ifr
+            export VLLM_PD_K_MODE=cfr
             export VLLM_PD_AUTO_COMPUTE_N="${_user_auto_n:-1}"
             export VLLM_PD_OOM_TOLERANCE="${_user_oom_tol:-0.01}"
             ;;
@@ -180,10 +182,11 @@ set_scheduler_env() {
             export VLLM_PD_OOM_TOLERANCE="${_user_oom_tol:-0.01}"
             ;;
         ebplus)
-            # Auto mode: Δ(N) decides MB vs EB online; IFR adaptive k̂ inside EB.
+            # Journal version: ADA selector with EB inside using midpoint
+            # construction (K_MODE=cfr). ICML used K_MODE=ifr.
             export VLLM_USE_PD_SCHEDULER=1
             export VLLM_PD_SCHEDULER_MODE=auto
-            export VLLM_PD_K_MODE=ifr
+            export VLLM_PD_K_MODE=cfr
             export VLLM_PD_AUTO_COMPUTE_N="${_user_auto_n:-1}"
             export VLLM_PD_OOM_TOLERANCE="${_user_oom_tol:-0.01}"
             export VLLM_PD_AUTO_COLD_START_MODE="${VLLM_PD_AUTO_COLD_START_MODE:-mb}"

@@ -75,7 +75,7 @@ done
 ensure_calibration "$MODEL" "$MODEL_SHORT"
 
 # Output directory
-OUTPUT_DIR="${SCRIPT_DIR}/../outputs/concurrency_shift_${MODEL_SHORT}_$(date +%Y%m%d_%H%M%S)"
+OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/../outputs/concurrency_shift_${MODEL_SHORT}_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$OUTPUT_DIR/logs"
 
 # Initialize environment
@@ -107,6 +107,7 @@ python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
     --num-prompts-per-phase "$MAX_PHASE_PROMPTS" \
     --phases "${INPUT_LEN}:${OUTPUT_LEN}" \
     --variance "$OUTPUT_VARIANCE" \
+    --distribution "${OUTPUT_DISTRIBUTION:-uniform}" \
     --source-dataset "$SOURCE_DATASET" \
     --output "$SYNTHETIC_DATASET" \
     --seed 42
@@ -169,13 +170,17 @@ run_single_experiment() {
     unset VLLM_USE_PD_SCHEDULER VLLM_PD_K_MODE VLLM_PD_K_RATIO \
           VLLM_PD_K_STAR VLLM_PD_IFR_WINDOW_SIZE VLLM_PD_SCHEDULER_MODE
 
+    # Journal §5 uses CFR (geometric output) main-text setup. theta_floor=0.01
+    # (scheduler default; journal KV-aware Phase-1->2 gate handles phase-thrashing).
+    export VLLM_PD_THETA_FLOOR=${VLLM_PD_THETA_FLOOR:-0.01}
+
     case "$scheduler" in
         v1)
             ;;
         eb)
-            # EB(k̂*) with IFR adaptive (k̂*, N̂*) — paper Algorithm 1.
+            # EB(k̂*) with CFR closed-form (k̂*, N̂*) — journal main-text §5.
             export VLLM_USE_PD_SCHEDULER=1
-            export VLLM_PD_K_MODE=ifr
+            export VLLM_PD_K_MODE=${VLLM_PD_K_MODE:-cfr}
             export VLLM_PD_IFR_WINDOW_SIZE=$IFR_WINDOW_SIZE
             export VLLM_PD_AUTO_COMPUTE_N=1
             export VLLM_PD_OOM_TOLERANCE=0.01
@@ -186,10 +191,10 @@ run_single_experiment() {
             export VLLM_PD_K_RATIO=$K_RATIO
             ;;
         ebplus)
-            # EB⁺ = auto MB↔EB switch with IFR adaptive (k̂*, N̂*),
-            # matching the camera-ready paper Algorithm 1.
+            # EB⁺ (ADA) = auto MB↔EB switch with CFR closed-form (k̂*, N̂*),
+            # journal main-text §5.
             export VLLM_PD_SCHEDULER_MODE=auto
-            export VLLM_PD_K_MODE=ifr
+            export VLLM_PD_K_MODE=${VLLM_PD_K_MODE:-cfr}
             export VLLM_PD_AUTO_COMPUTE_N=1
             export VLLM_PD_OOM_TOLERANCE=0.01
             ;;

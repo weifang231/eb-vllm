@@ -54,7 +54,7 @@ TOTAL_PROMPTS=$((NUM_PROMPTS_PER_PHASE * NUM_PHASES))
 ensure_calibration "$MODEL" "$MODEL_SHORT"
 
 # Output directory
-OUTPUT_DIR="${SCRIPT_DIR}/../outputs/distribution_shift_${MODEL_SHORT}_$(date +%Y%m%d_%H%M%S)"
+OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/../outputs/distribution_shift_${MODEL_SHORT}_$(date +%Y%m%d_%H%M%S)}"
 mkdir -p "$OUTPUT_DIR/logs"
 
 # Initialize environment
@@ -87,6 +87,7 @@ python3 "${SCRIPT_DIR}/generate_distribution_shift_dataset.py" \
     --num-prompts-per-phase "$NUM_PROMPTS_PER_PHASE" \
     --phases "$PHASES" \
     --variance "$OUTPUT_VARIANCE" \
+    --distribution "${OUTPUT_DISTRIBUTION:-uniform}" \
     --source-dataset "$SOURCE_DATASET" \
     --output "$SYNTHETIC_DATASET" \
     --seed 42
@@ -159,21 +160,20 @@ run_single_experiment() {
     unset VLLM_USE_PD_SCHEDULER VLLM_PD_K_MODE VLLM_PD_K_RATIO \
           VLLM_PD_K_STAR VLLM_PD_IFR_WINDOW_SIZE VLLM_PD_SCHEDULER_MODE
 
-    # Non-stationary workloads (3-phase distribution shift) need a higher
-    # IFR theta_min than the default to handle the sliding-window estimator's
-    # transient lag during phase changes. Without it, eb settles at a
-    # too-low theta during decode-heavy phase 3 and kv_escape interaction
-    # tanks throughput. Override the scheduler default of 0.3 to 0.7 here
-    # to reproduce paper Table 5 numbers. (Stationary scripts keep 0.3.)
-    export VLLM_PD_THETA_FLOOR=${VLLM_PD_THETA_FLOOR:-0.7}
+    # Journal §5 uses CFR (geometric output) main-text setup. Both EB and ADA
+    # use K_MODE=cfr (closed-form midpoint construction). theta_floor=0.01
+    # (scheduler default) — the journal version's KV-aware Phase-1->2 gate
+    # handles phase-thrashing, so the old 0.3/0.7 workload-specific clipping
+    # is no longer needed.
+    export VLLM_PD_THETA_FLOOR=${VLLM_PD_THETA_FLOOR:-0.01}
 
     case "$scheduler" in
         v1)
             ;;
         eb)
-            # EB(k̂*) with IFR adaptive (k̂*, N̂*) — paper Algorithm 1.
+            # EB(k̂*) with CFR closed-form (k̂*, N̂*) — journal main-text §5.
             export VLLM_USE_PD_SCHEDULER=1
-            export VLLM_PD_K_MODE=ifr
+            export VLLM_PD_K_MODE=${VLLM_PD_K_MODE:-cfr}
             export VLLM_PD_IFR_WINDOW_SIZE=$IFR_WINDOW_SIZE
             export VLLM_PD_AUTO_COMPUTE_N=1
             export VLLM_PD_OOM_TOLERANCE=0.01
@@ -184,10 +184,10 @@ run_single_experiment() {
             export VLLM_PD_K_RATIO=$K_RATIO
             ;;
         ebplus)
-            # EB⁺ = auto MB↔EB switch with IFR adaptive (k̂*, N̂*),
-            # matching the camera-ready paper Algorithm 1.
+            # EB⁺ (ADA) = auto MB↔EB switch with CFR closed-form (k̂*, N̂*),
+            # journal main-text §5.
             export VLLM_PD_SCHEDULER_MODE=auto
-            export VLLM_PD_K_MODE=ifr
+            export VLLM_PD_K_MODE=${VLLM_PD_K_MODE:-cfr}
             export VLLM_PD_IFR_WINDOW_SIZE=$IFR_WINDOW_SIZE
             export VLLM_PD_AUTO_COMPUTE_N=1
             export VLLM_PD_OOM_TOLERANCE=0.01

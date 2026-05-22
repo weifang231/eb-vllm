@@ -40,6 +40,13 @@ RANDOM_RANGE_RATIO=${RANDOM_RANGE_RATIO:-0.5}
 BASE_PORT=${BASE_PORT:-10100}
 SKIP_EXISTING=${SKIP_EXISTING:-1}
 
+# TABLE1=1 switches the script into paper-Table-1 mode (controller validation
+# faithful to the closed-form spec): per-workload N̂ and θ̂_0 are pre-computed
+# offline from ground-truth (p_0, μ_L) + calibration + KV capacity, then
+# pinned at runtime (max-num-seqs=N̂, K_MODE=ratio, AUTO_COMPUTE_N=0). The
+# k-sweep is per-workload (at that N̂) using log-uniform k/N ratios.
+TABLE1=${TABLE1:-0}
+
 # Per-workload (B, N) defaults — tuned for Qwen3-8B; override via env vars.
 # Paper Fig 3 caption: "Validation on H200, N = 1024." Defaults below pin
 # N=1024 across all three scenarios + AUTO_COMPUTE_N=0 below for paper-
@@ -82,6 +89,63 @@ MODEL_SHORT=$(echo "$MODEL" | sed 's|.*/||')
 OUTPUT_DIR=${OUTPUT_DIR:-"${SCRIPT_DIR}/outputs/controller_validation/${GPU_TAG}_${MODEL_SHORT}"}
 mkdir -p "$OUTPUT_DIR"
 
+# ----------------------------------------------------------------------
+# TABLE1 mode: pre-compute (θ̂_0, N̂) per workload from closed-form math
+# using ground-truth (p_0, μ_L). Requires KV capacity in tokens; we try
+# (1) env var VLLM_PD_KV_CAPACITY_TOKENS, then (2) parse from any prior
+# eb.log under OUTPUT_DIR, else error out with instructions.
+# ----------------------------------------------------------------------
+declare -A TABLE1_N_HAT TABLE1_THETA_HAT TABLE1_K_HAT TABLE1_P0 TABLE1_MU_L TABLE1_MU_O
+if [ "$TABLE1" = "1" ]; then
+    KV_CAP=${VLLM_PD_KV_CAPACITY_TOKENS:-}
+    if [ -z "$KV_CAP" ]; then
+        # Best-effort grep from existing run logs.
+        cap_line=$(grep -h "GPU KV cache size:" "$OUTPUT_DIR"/*/logs/*.log 2>/dev/null \
+                    | head -1 | sed -E 's/.*GPU KV cache size:[[:space:]]*([0-9,]+).*/\1/' \
+                    | tr -d ',')
+        if [ -n "$cap_line" ]; then
+            KV_CAP=$cap_line
+            echo "[TABLE1] auto-detected KV capacity = $KV_CAP tokens (from prior log)"
+        else
+            echo "ERROR: TABLE1 mode requires KV cache capacity (tokens). Set" >&2
+            echo "  export VLLM_PD_KV_CAPACITY_TOKENS=<num_gpu_blocks * block_size>" >&2
+            echo "or do a probe run first so we can grep it from eb.log." >&2
+            exit 1
+        fi
+    fi
+
+    HELPER="${SCRIPT_DIR}/compute_closed_form.py"
+    for scenario in decode_heavy balanced prefill_heavy; do
+        case "$scenario" in
+            decode_heavy)  E_L=128;  E_O=1024 ;;
+            balanced)      E_L=512;  E_O=512  ;;
+            prefill_heavy) E_L=1024; E_O=128  ;;
+        esac
+        p0=$(awk -v e="$E_O" 'BEGIN{printf "%.10f", 1.0/e}')
+        out=$(python3 "$HELPER" --alpha-p "$ALPHA_P" --beta-p "$BETA_P" \
+                  --alpha-d "$ALPHA_D" --beta-d "$BETA_D" \
+                  --p0 "$p0" --mu-l "$E_L" \
+                  --capacity-tokens "$KV_CAP" --eps "${VLLM_PD_OOM_TOLERANCE:-0.01}" \
+                  --json)
+        TABLE1_THETA_HAT[$scenario]=$(echo "$out" | python3 -c "import sys,json;print(json.load(sys.stdin)['theta_0'])")
+        TABLE1_N_HAT[$scenario]=$(echo "$out" | python3 -c "import sys,json;print(json.load(sys.stdin)['N_hat'])")
+        TABLE1_K_HAT[$scenario]=$(echo "$out" | python3 -c "import sys,json;print(json.load(sys.stdin)['k_hat'])")
+        TABLE1_P0[$scenario]=$p0
+        TABLE1_MU_L[$scenario]=$E_L
+        TABLE1_MU_O[$scenario]=$E_O
+        echo "[TABLE1] $scenario: θ̂_0=${TABLE1_THETA_HAT[$scenario]}, N̂=${TABLE1_N_HAT[$scenario]}, k̂=${TABLE1_K_HAT[$scenario]}"
+    done
+
+    # Override BS_* with the closed-form N̂; force AUTO_COMPUTE_N=0 so N stays pinned.
+    BS_DECODE_HEAVY=${TABLE1_N_HAT[decode_heavy]}
+    BS_BALANCED=${TABLE1_N_HAT[balanced]}
+    BS_PREFILL_HEAVY=${TABLE1_N_HAT[prefill_heavy]}
+    export VLLM_PD_AUTO_COMPUTE_N=0
+    # Sweep grid is log-uniform k/N ratios bracketing θ̂_0 ∈ [0.013, 0.05].
+    K_RATIOS=${K_RATIOS:-"0.005 0.01 0.02 0.05 0.1 0.25 0.5 1.0"}
+    K_VALUES=""  # Disable the legacy integer-k sweep — TABLE1 uses K_RATIOS instead.
+fi
+
 select_gpus "$MAX_GPUS"
 
 echo "========================================"
@@ -91,8 +155,13 @@ echo "  GPU: ${GPU_NAME} (${GPU_TAG}); MODEL: ${MODEL}"
 echo "  ε (OOM tolerance): ${VLLM_PD_OOM_TOLERANCE}"
 echo "  Update interval: ${VLLM_PD_IFR_UPDATE_INTERVAL}"
 echo "  Window size: ${VLLM_PD_IFR_WINDOW_SIZE} (min samples=${VLLM_PD_IFR_MIN_SAMPLES})"
-n_k=$(echo "$K_VALUES" | wc -w)
-echo "  Fixed-k sweep: ${n_k} k values at N=${FIXED_K_N} (set K_VALUES='' to skip)"
+if [ "$TABLE1" = "1" ]; then
+    n_k=$(echo "$K_RATIOS" | wc -w)
+    echo "  TABLE1 mode: per-workload sweep over ${n_k} k/N ratios at workload-specific N̂"
+else
+    n_k=$(echo "$K_VALUES" | wc -w)
+    echo "  Fixed-k sweep: ${n_k} k values at N=${FIXED_K_N} (set K_VALUES='' to skip)"
+fi
 echo "  OUTPUT: ${OUTPUT_DIR}"
 echo ""
 
@@ -110,14 +179,37 @@ for scenario in decode_heavy balanced prefill_heavy; do
     esac
     echo "v1|${scenario}|${bs}|${tb}"     >> "$QUEUE_FILE"
     echo "eb|${scenario}|${bs}|${tb}" >> "$QUEUE_FILE"
-    for k in $K_VALUES; do
-        # Fixed-k sweep cells share the scenario's tb but pin N=FIXED_K_N
-        # (paper caption) regardless of the scenario's default BS.
-        echo "eb_fixed_k_${k}|${scenario}|${FIXED_K_N}|${tb}" >> "$QUEUE_FILE"
-    done
+    if [ "$TABLE1" = "1" ]; then
+        # TABLE1: per-workload sweep at the workload's N̂, encoded as
+        # eb_kratio_<ratio> so that run_experiment can recover k_ratio
+        # without needing FIXED_K_N (which is implicit = bs).
+        for r in $K_RATIOS; do
+            tag=$(awk -v r="$r" 'BEGIN{printf "kratio_%g", r}')
+            echo "eb_${tag}|${scenario}|${bs}|${tb}" >> "$QUEUE_FILE"
+        done
+    else
+        for k in $K_VALUES; do
+            # Legacy fixed-k sweep: pinned N=FIXED_K_N regardless of bs.
+            echo "eb_fixed_k_${k}|${scenario}|${FIXED_K_N}|${tb}" >> "$QUEUE_FILE"
+        done
+    fi
 done
 TOTAL_EXPERIMENTS=$(wc -l < "$QUEUE_FILE")
 
+if [ "$TABLE1" = "1" ]; then
+    TABLE1_BLOCK=$(cat <<TBL
+    "table1_mode": true,
+    "kv_capacity_tokens": ${KV_CAP},
+    "table1_closed_form": {
+        "decode_heavy":  {"theta_0": ${TABLE1_THETA_HAT[decode_heavy]},  "N_hat": ${TABLE1_N_HAT[decode_heavy]},  "k_hat": ${TABLE1_K_HAT[decode_heavy]}},
+        "balanced":      {"theta_0": ${TABLE1_THETA_HAT[balanced]},      "N_hat": ${TABLE1_N_HAT[balanced]},      "k_hat": ${TABLE1_K_HAT[balanced]}},
+        "prefill_heavy": {"theta_0": ${TABLE1_THETA_HAT[prefill_heavy]}, "N_hat": ${TABLE1_N_HAT[prefill_heavy]}, "k_hat": ${TABLE1_K_HAT[prefill_heavy]}}
+    },
+TBL
+)
+else
+    TABLE1_BLOCK='    "table1_mode": false,'
+fi
 cat > "${OUTPUT_DIR}/experiment_config.json" <<EOF
 {
     "experiment_type": "controller_validation",
@@ -132,6 +224,7 @@ cat > "${OUTPUT_DIR}/experiment_config.json" <<EOF
     "ifr_min_samples": ${VLLM_PD_IFR_MIN_SAMPLES},
     "auto_compute_n": ${VLLM_PD_AUTO_COMPUTE_N},
     "oom_tolerance": ${VLLM_PD_OOM_TOLERANCE},
+${TABLE1_BLOCK}
     "scenarios": {
         "decode_heavy":   {"input_len": 128,  "output_len": 1024, "bs": ${BS_DECODE_HEAVY},  "tb": ${TB_DECODE_HEAVY}},
         "balanced":       {"input_len": 512,  "output_len": 512,  "bs": ${BS_BALANCED},      "tb": ${TB_BALANCED}},
@@ -167,15 +260,34 @@ run_experiment() {
 
     export CUDA_VISIBLE_DEVICES=$gpu_id
     export VLLM_COLLECT_SCHEDULE_STATS=1
+    # TABLE1 mode pins ground-truth (p_0, μ_L, μ_O) for every cell so that
+    # any cfr-path computation also matches the closed form (sweep cells
+    # don't go through cfr, but EB does).
+    if [ "$TABLE1" = "1" ]; then
+        export VLLM_PD_FIXED_P0=${TABLE1_P0[$scenario]}
+        export VLLM_PD_FIXED_MU_L=${TABLE1_MU_L[$scenario]}
+        export VLLM_PD_FIXED_MU_O=${TABLE1_MU_O[$scenario]}
+    else
+        unset VLLM_PD_FIXED_P0 VLLM_PD_FIXED_MU_L VLLM_PD_FIXED_MU_O
+    fi
     if [[ "$sched" == eb_fixed_k_* ]]; then
-        # Fixed-k sweep: explicit theta* = k / N, no online adaptation, no
-        # memory-safe N̂* shrink. Reuses set_scheduler_env eb_kratio with a
-        # custom K_RATIO computed from the scheduler name, then re-exports
-        # AUTO_COMPUTE_N=0 (which set_scheduler_env unsets in its prelude).
+        # Legacy fixed-k sweep: explicit theta* = k / N, no online adaptation,
+        # no memory-safe N̂* shrink.
         local k_val="${sched#eb_fixed_k_}"
         local k_ratio
         k_ratio=$(awk -v k="$k_val" -v n="$bs" 'BEGIN{printf "%.6f", k/n}')
         VLLM_PD_K_RATIO="$k_ratio" set_scheduler_env eb_kratio || return 1
+        export VLLM_PD_AUTO_COMPUTE_N=0
+    elif [[ "$sched" == eb_kratio_* ]]; then
+        # TABLE1 per-workload sweep: k_ratio encoded in the name; N̂ pinned
+        # via max-num-seqs=bs (the closed-form N̂).
+        local k_ratio="${sched#eb_kratio_}"
+        VLLM_PD_K_RATIO="$k_ratio" set_scheduler_env eb_kratio || return 1
+        export VLLM_PD_AUTO_COMPUTE_N=0
+    elif [ "$sched" = "eb" ] && [ "$TABLE1" = "1" ]; then
+        # TABLE1 EB row: pin k_ratio = closed-form θ̂_0, no online updates.
+        VLLM_PD_K_RATIO=${TABLE1_THETA_HAT[$scenario]} \
+            set_scheduler_env eb_kratio || return 1
         export VLLM_PD_AUTO_COMPUTE_N=0
     else
         set_scheduler_env "$sched" || return 1

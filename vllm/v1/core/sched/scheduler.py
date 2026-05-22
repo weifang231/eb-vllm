@@ -561,9 +561,32 @@ class Scheduler(SchedulerInterface):
             _acp = os.environ.get("VLLM_PD_ALPHA_MB", "")
             self._alpha_mb = float(_acp) if _acp else self.pd_alpha_p
 
-            # Hysteresis band and cooldown for mode switching
+            # Hysteresis band and cooldown for mode switching.
+            # When VLLM_PD_MODE_SWITCH_DELTA_ADAPTIVE=1, the effective δ is
+            # max(env_floor, k * σ(LHS-RHS)) where σ is estimated from a
+            # rolling window of the last `_signal_window_max` evaluations.
+            # The env value then acts as a floor on δ (default 1e-6 = essentially
+            # no floor) and `_adaptive_k` controls the multiplier (default 2.0).
             self._mode_switch_delta = float(
                 os.environ.get("VLLM_PD_MODE_SWITCH_DELTA", "0.0001")
+            )
+            self._mode_switch_delta_adaptive = (
+                os.environ.get("VLLM_PD_MODE_SWITCH_DELTA_ADAPTIVE", "0") == "1"
+            )
+            self._mode_switch_delta_adaptive_k = float(
+                os.environ.get("VLLM_PD_MODE_SWITCH_DELTA_K", "2.0")
+            )
+            # Sticky-EB: asymmetric δ (entering EB uses δ; leaving EB uses δ × factor).
+            # EB carries memory-safety guarantee via N̂* admission, so the selector
+            # biases toward staying in EB once it has been chosen. Default 3.0
+            # blocks the borderline drain-state false positives we observed in
+            # CFR non-stationary benches (|Δ|/δ typically < 3 at end-of-bench).
+            self._mode_switch_sticky_factor = float(
+                os.environ.get("VLLM_PD_MODE_SWITCH_STICKY_FACTOR", "3.0")
+            )
+            import collections
+            self._mode_switch_signal_window: collections.deque = collections.deque(
+                maxlen=int(os.environ.get("VLLM_PD_MODE_SWITCH_WINDOW", "10"))
             )
             self._mode_cooldown_max = int(os.environ.get("VLLM_PD_MODE_COOLDOWN", "3"))
             self._mode_cooldown = 0
@@ -578,6 +601,11 @@ class Scheduler(SchedulerInterface):
             # Mode switch tracking for stats/debugging
             self._mode_switch_history: list[dict] = []
             self._mode_switch_count = 0
+            # Per-evaluation diagnostic trace: records LHS/RHS/Δ at every
+            # _evaluate_mode_switch call, even when no switch fires. Useful
+            # for tuning the diagnostic (e.g., understanding why a bench
+            # has 0 switches).
+            self._mode_switch_eval_history: list[dict] = []
 
             logger.info(
                 f"[EB+] Auto mode initialized: "
@@ -585,6 +613,7 @@ class Scheduler(SchedulerInterface):
                 f"mb_cost_profiled={self._mb_cost_profiled}, "
                 f"alpha_mb={self._alpha_mb:.6f}, "
                 f"delta={self._mode_switch_delta}, "
+                f"sticky_factor={self._mode_switch_sticky_factor}, "
                 f"cooldown={self._mode_cooldown_max}"
             )
 
@@ -1334,6 +1363,20 @@ class Scheduler(SchedulerInterface):
         mu_L = max(1.0, float(self.pd_avg_prompt_len))
         mu_O = max(1.0, float(self.pd_avg_output_tokens))
 
+        # Ground-truth pin for closed-form controller validation (Table 1).
+        # When set, bypass the online estimator and feed Prop. threshold_cfr /
+        # Prop. memory the workload-definition values directly.
+        _fixed_p0 = os.environ.get("VLLM_PD_FIXED_P0")
+        if _fixed_p0:
+            p_0 = float(_fixed_p0)
+            self.pd_hazard_p0 = p_0
+        _fixed_mu_L = os.environ.get("VLLM_PD_FIXED_MU_L")
+        if _fixed_mu_L:
+            mu_L = max(1.0, float(_fixed_mu_L))
+        _fixed_mu_O = os.environ.get("VLLM_PD_FIXED_MU_O")
+        if _fixed_mu_O:
+            mu_O = max(1.0, float(_fixed_mu_O))
+
         # Step 2: θ_0 from the exact formula.
         theta_zero = self._compute_theta_zero_exact(p_0)
         theta_zero_clamped = max(_PD_THETA_HARD_MIN, min(self.pd_theta_max, theta_zero))
@@ -1704,20 +1747,58 @@ class Scheduler(SchedulerInterface):
         RHS = (1.0 / (mu_L + mu_o)) * (eb_overhead - mb_overhead)
 
         # --- Decision with hysteresis ---
-        delta = self._mode_switch_delta
+        # signal = LHS - RHS; |signal| > δ triggers a switch
+        signal = LHS - RHS
+        self._mode_switch_signal_window.append(signal)
+
+        if self._mode_switch_delta_adaptive and len(self._mode_switch_signal_window) >= 4:
+            import statistics
+            sigma = statistics.stdev(self._mode_switch_signal_window)
+            delta = max(self._mode_switch_delta, self._mode_switch_delta_adaptive_k * sigma)
+        else:
+            delta = self._mode_switch_delta
+
+        # Asymmetric δ ("sticky EB"): leaving EB requires stronger evidence
+        # because EB carries the memory-safety guarantee (N̂* admission).
+        # Entering EB uses base δ; leaving EB uses δ × sticky_factor.
+        delta_to_eb = delta
+        delta_to_mb = delta * self._mode_switch_sticky_factor
+
+        # Record per-evaluation diagnostic (even when no switch fires).
+        # Bounded: ~10 records/min in a typical bench, so capping at 2000 entries
+        # is enough for >3 hours of bench while keeping memory negligible.
+        if len(self._mode_switch_eval_history) < 2000:
+            self._mode_switch_eval_history.append({
+                "timestamp": time.monotonic() - self._pd_start_time,
+                "active_mode": self._active_scheduler,
+                "LHS": LHS,
+                "RHS": RHS,
+                "signal": signal,
+                "delta": delta,
+                "delta_to_eb": delta_to_eb,
+                "delta_to_mb": delta_to_mb,
+                "r": r,
+                "mu_L": mu_L,
+                "mu_o": mu_o,
+                "N_obs": N_obs,
+                "theta0": theta0,
+                "in_cooldown": self._mode_cooldown > 0,
+                "would_switch_to_eb": (RHS + delta_to_eb < LHS),
+                "would_switch_to_mb": (RHS - delta_to_mb > LHS),
+            })
 
         if self._mode_cooldown > 0:
             self._mode_cooldown -= 1
             return
 
         old_mode = self._active_scheduler
-        if RHS + delta < LHS:
+        if RHS + delta_to_eb < LHS:
             # Contention dominates → EB is better
             if self._active_scheduler != "eb":
                 self._transition_to_eb()
                 self._mode_cooldown = self._mode_cooldown_max
-        elif RHS - delta > LHS and self._active_scheduler != "mb":
-            # Amortization dominates → MB is better
+        elif RHS - delta_to_mb > LHS and self._active_scheduler != "mb":
+            # Amortization dominates → MB is better (sticky-EB: harder to leave EB)
             self._transition_to_mb()
             self._mode_cooldown = self._mode_cooldown_max
 
@@ -4267,6 +4348,11 @@ class Scheduler(SchedulerInterface):
                     else [],
                     "mode_switch_history": (
                         self._mode_switch_history
+                        if self.scheduler_mode == "auto"
+                        else []
+                    ),
+                    "mode_switch_eval_history": (
+                        self._mode_switch_eval_history
                         if self.scheduler_mode == "auto"
                         else []
                     ),

@@ -81,8 +81,13 @@ def generate_dataset(
     variance: float,
     source_prompts: list[str],
     seed: int = 42,
+    distribution: str = "uniform",
 ) -> list[dict]:
-    """Generate multi-phase JSONL records."""
+    """Generate multi-phase JSONL records.
+
+    distribution: "uniform" (default; ±variance around target_output, IFR) or
+                  "geometric" (CFR; p_0 = 1/target_output, clipped to [16, 8192]).
+    """
     rng = random.Random(seed)
     np_rng = np.random.RandomState(seed)
     records = []
@@ -90,13 +95,19 @@ def generate_dataset(
     for phase_idx, (target_input, target_output) in enumerate(phases):
         phase_name = _phase_name(target_input, target_output)
         print(f"\nPhase {phase_idx + 1} ({phase_name}): "
-              f"input~{target_input}, output~{target_output}, "
+              f"input~{target_input}, output~{target_output} ({distribution}), "
               f"n={num_per_phase}")
 
-        # Sample output lengths with variance
-        low = max(16, int(target_output * (1 - variance)))
-        high = max(low + 1, int(target_output * (1 + variance)))
-        output_lens = np_rng.randint(low, high + 1, size=num_per_phase)
+        if distribution == "geometric":
+            # CFR (geometric) output: p_0 = 1/E[O]; clip to a safe range
+            p_0 = 1.0 / max(1, target_output)
+            raw = np_rng.geometric(p=p_0, size=num_per_phase)
+            output_lens = np.clip(raw, 16, 8192)
+        else:
+            # Uniform jitter (IFR-like): ±variance·E[O]
+            low = max(16, int(target_output * (1 - variance)))
+            high = max(low + 1, int(target_output * (1 + variance)))
+            output_lens = np_rng.randint(low, high + 1, size=num_per_phase)
 
         actual_input_lens = []
         actual_output_lens = []
@@ -153,7 +164,13 @@ def main():
     )
     parser.add_argument(
         "--variance", type=float, default=0.25,
-        help="Relative variance for output_len (±fraction around mean).",
+        help="Relative variance for output_len (±fraction around mean). Ignored when --distribution=geometric.",
+    )
+    parser.add_argument(
+        "--distribution", type=str, default="uniform",
+        choices=["uniform", "geometric"],
+        help="Output-length distribution. 'uniform' is the legacy IFR-like jitter; "
+             "'geometric' is CFR with p_0 = 1/E[O] (paper §5 main-text setup).",
     )
     parser.add_argument(
         "--source-dataset", type=str, default="alpaca",
@@ -210,6 +227,7 @@ def main():
         variance=args.variance,
         source_prompts=prompts,
         seed=args.seed,
+        distribution=args.distribution,
     )
 
     # Write JSONL

@@ -59,8 +59,92 @@ def load_run(workload_dir: Path, sched: str) -> dict | None:
     return {"bench": b, "stats": s, "bench_path": bench, "stats_path": stats}
 
 
+STEADY_STATE_LO = 0.2  # drop first 20% by time
+STEADY_STATE_HI = 0.8  # drop last 20% by time
+
+
+def _steady_state_window(steps: list[dict]) -> tuple[float, float]:
+    """Return (t_lo, t_hi) defining the steady-state middle 60% by time."""
+    if not steps:
+        return (0.0, 0.0)
+    t0 = steps[0].get("timestamp", 0.0)
+    t_end = steps[-1].get("timestamp", 0.0)
+    span = t_end - t0
+    if span <= 0:
+        return (t0, t_end)
+    return (t0 + STEADY_STATE_LO * span, t0 + STEADY_STATE_HI * span)
+
+
+def per_cycle_oom_rate(stats_blob: dict, steady_only: bool = True
+                       ) -> tuple[int, int, float]:
+    """Compute per-cycle OOM rate from the per-step `stats` array.
+
+    A cycle = one decode span (phase == 1) bounded by transitioning out of
+    phase 1 (to phase 0/2). A cycle is counted as OOM if any preemption
+    fires during the decode span. Matches Prop. memory event
+    Pr(X_max > C) > 0 over the cycle.
+
+    With `steady_only=True`, only cycles whose decode span ENDS inside the
+    steady-state middle 60% time window are counted.
+
+    Returns (n_cycles, n_oom_cycles, oom_rate).
+    """
+    steps = stats_blob.get("stats") or []
+    if not steps:
+        return 0, 0, float("nan")
+    t_lo, t_hi = _steady_state_window(steps) if steady_only else (
+        float("-inf"), float("inf"))
+    cycles = 0
+    oom_cycles = 0
+    cur_preempt = 0
+    in_decode = False
+    for s in steps:
+        ph = s.get("phase", -1)
+        npre = s.get("num_preempted_reqs", 0) or 0
+        ts = s.get("timestamp", 0.0)
+        if ph == 1:
+            in_decode = True
+            cur_preempt += npre
+        elif in_decode:
+            if t_lo <= ts <= t_hi:
+                cycles += 1
+                if cur_preempt > 0:
+                    oom_cycles += 1
+            cur_preempt = 0
+            in_decode = False
+    if in_decode:
+        ts_end = steps[-1].get("timestamp", 0.0)
+        if t_lo <= ts_end <= t_hi:
+            cycles += 1
+            if cur_preempt > 0:
+                oom_cycles += 1
+    rate = oom_cycles / cycles if cycles > 0 else float("nan")
+    return cycles, oom_cycles, rate
+
+
+def steady_state_throughput(stats_blob: dict) -> tuple[float, float]:
+    """Compute steady-state token throughput from per-step stats.
+
+    Sums (prefill_tokens + decode_tokens) over steps falling in the middle
+    60% time window, divided by the window length. Returns (tp, window_s).
+    """
+    steps = stats_blob.get("stats") or []
+    if not steps:
+        return float("nan"), 0.0
+    t_lo, t_hi = _steady_state_window(steps)
+    window = t_hi - t_lo
+    if window <= 0:
+        return float("nan"), 0.0
+    tokens = 0
+    for s in steps:
+        ts = s.get("timestamp", 0.0)
+        if t_lo <= ts <= t_hi:
+            tokens += int(s.get("total_tokens", 0) or 0)
+    return tokens / window, window
+
+
 def discover_schedulers(workload_dir: Path) -> list[str]:
-    """Return scheduler names in a stable order: v1, eb, fixed-k sweep."""
+    """Return scheduler names in a stable order: v1, eb, sweep cells."""
     names = {p.stem.removeprefix("bench_") for p in workload_dir.glob("bench_*.json")}
     ordered: list[str] = []
     for primary in ("v1", "eb"):
@@ -71,6 +155,11 @@ def discover_schedulers(workload_dir: Path) -> list[str]:
         key=lambda n: int(n.removeprefix("eb_fixed_k_")),
     )
     ordered.extend(fixed)
+    kratio = sorted(
+        (n for n in names if n.startswith("eb_kratio_")),
+        key=lambda n: float(n.removeprefix("eb_kratio_")),
+    )
+    ordered.extend(kratio)
     return ordered
 
 
@@ -86,32 +175,49 @@ def summarise(workload_dir: Path, scen: str, cfg: dict) -> list[dict]:
         last = hist[-1] if hist else {}
         pd_cfg = s.get("pd_config", {})
         is_fixed_k = sched.startswith("eb_fixed_k_")
+        is_kratio = sched.startswith("eb_kratio_")
+        table1_cf = cfg.get("table1_closed_form", {}).get(scen, {})
 
         # Ground truth
         gt_o = GROUND_TRUTH[scen]["output_len"]
         gt_l = GROUND_TRUTH[scen]["input_len"]
         gt_p_0 = 1.0 / gt_o
 
-        # Online estimates (NaN for fixed-k — controller is disabled)
+        # Online estimates (NaN for sweep cells — controller is disabled)
         out_lens = b.get("output_lens") or []
         in_lens = b.get("input_lens") or []
         realised_o = float(np.mean(out_lens)) if out_lens else 0.0
         realised_l = float(np.mean(in_lens)) if in_lens else 0.0
+        bs_pinned = int(pd_cfg.get("max_num_seqs", 0))
         if is_fixed_k:
             p_hat = float("nan")
             mu_l_hat = float("nan")
             theta_0 = float("nan")
             k_hat = int(sched.removeprefix("eb_fixed_k_"))
+        elif is_kratio:
+            # TABLE1 sweep cell: k pinned via ratio, no estimator updates.
+            p_hat = float("nan")
+            mu_l_hat = float("nan")
+            theta_0 = float("nan")
+            ratio = float(sched.removeprefix("eb_kratio_"))
+            k_hat = max(1, int(round(ratio * bs_pinned)))
         else:
             p_hat = last.get("p_0_estimate", 0.0)
             mu_l_hat = last.get("mu_L_estimate", 0.0)
             theta_0 = last.get("theta_0", 0.0)
             k_hat = int(last.get("k_hat_int", pd_cfg.get("final_k_star", 0)))
+            # In TABLE1 mode the EB row is also run as eb_kratio internally
+            # (no cfr update). Recover closed-form θ_0 / k̂ from config.
+            if sched == "eb" and table1_cf and (not theta_0 or math.isnan(theta_0)):
+                theta_0 = float(table1_cf.get("theta_0", 0.0))
+                k_hat = int(table1_cf.get("k_hat", 0)) or k_hat
 
         # Throughput attainment (only meaningful for the adaptive controller)
-        n_hat = int(last.get("N_hat", pd_cfg.get("max_num_seqs", 0)))
+        n_hat = int(last.get("N_hat", bs_pinned))
+        if sched == "eb" and table1_cf:
+            n_hat = int(table1_cf.get("N_hat", n_hat))
         cal = cfg.get("calibration_params", {})
-        if is_fixed_k or not isinstance(theta_0, (int, float)) or math.isnan(theta_0):
+        if is_fixed_k or is_kratio or not isinstance(theta_0, (int, float)) or math.isnan(theta_0):
             tp_fluid = float("nan")
             attainment = float("nan")
         else:
@@ -137,11 +243,13 @@ def summarise(workload_dir: Path, scen: str, cfg: dict) -> list[dict]:
         if p99_tpot_ms is None:
             p99_tpot_ms = float("nan")
 
-        # OOM rate
+        # OOM rate (per-request, legacy) + per-cycle steady-state (paper-faithful)
         completed = b.get("completed", 0)
         oom = pd_cfg.get("total_oom_events", 0)
         oom_rate = oom / max(completed, 1)
         eps = float(cfg.get("oom_tolerance", 0.01))
+        n_cycles, n_oom_cycles, oom_rate_cycle = per_cycle_oom_rate(s, steady_only=True)
+        tp_steady, steady_window_s = steady_state_throughput(s)
 
         rows.append({
             "scenario": scen,
@@ -169,10 +277,71 @@ def summarise(workload_dir: Path, scen: str, cfg: dict) -> list[dict]:
             "completed": completed,
             "oom_rate": oom_rate,
             "oom_rate_pct": oom_rate * 100,
+            "n_cycles_steady": n_cycles,
+            "n_oom_cycles_steady": n_oom_cycles,
+            "oom_rate_cycle_steady": oom_rate_cycle,
+            "oom_rate_cycle_steady_pct": (oom_rate_cycle * 100)
+                if not math.isnan(oom_rate_cycle) else float("nan"),
+            "tp_steady": tp_steady,
+            "steady_window_s": steady_window_s,
             "eps_target": eps,
             "n_updates": len(hist),
         })
     return rows
+
+
+def _annotate_sweep_optimum(rows: list[dict]) -> None:
+    """Per scenario, find theta*_sweep = argmax_k TP_steady among sweep cells
+    and compute TP ratio = TP_steady(EB at theta_0) / TP_steady(sweep argmax).
+
+    Uses steady-state throughput (middle-60% window) so the comparison
+    isn't polluted by cold-start. The TP ratio is only paper-faithful
+    when the sweep's N matches the EB controller's N_hat (caption:
+    "k-sweep at fixed N_hat") — TABLE1 mode arranges this; otherwise
+    tp_ratio_to_sweep is NaN.
+
+    Sweep cells include both eb_fixed_k_* (legacy integer-k) and
+    eb_kratio_* (TABLE1 per-workload ratio sweep).
+    """
+    by_scen: dict[str, list[dict]] = {}
+    for r in rows:
+        by_scen.setdefault(r["scenario"], []).append(r)
+    for scen, scen_rows in by_scen.items():
+        sweep = [
+            r for r in scen_rows
+            if r["scheduler"].startswith("eb_fixed_k_")
+            or r["scheduler"].startswith("eb_kratio_")
+        ]
+        eb_row = next((r for r in scen_rows if r["scheduler"] == "eb"), None)
+        if not sweep or eb_row is None:
+            continue
+        # Filter to cells with a valid steady-state TP measurement.
+        sweep_valid = [r for r in sweep if r["tp_steady"] > 0
+                       and not math.isnan(r["tp_steady"])]
+        if not sweep_valid:
+            continue
+        best = max(sweep_valid, key=lambda r: r["tp_steady"])
+        sweep_n = int(best["N_hat_final"])  # all sweep cells share the same N
+        # Recover k_sweep for both naming conventions.
+        sname = best["scheduler"]
+        if sname.startswith("eb_kratio_"):
+            theta_sweep = float(sname.removeprefix("eb_kratio_"))
+            k_sweep = int(round(theta_sweep * sweep_n))
+        else:
+            k_sweep = int(sname.removeprefix("eb_fixed_k_"))
+            theta_sweep = k_sweep / sweep_n if sweep_n > 0 else float("nan")
+        eb_n_hat = int(eb_row["N_hat_final"])
+        tp_ratio = (
+            eb_row["tp_steady"] / best["tp_steady"]
+            if best["tp_steady"] > 0 and sweep_n == eb_n_hat
+               and not math.isnan(eb_row["tp_steady"])
+            else float("nan")
+        )
+        eb_row["theta_sweep_star"] = theta_sweep
+        eb_row["k_sweep_star"] = k_sweep
+        eb_row["sweep_N"] = sweep_n
+        eb_row["tp_at_sweep_star"] = best["tp_steady"]
+        eb_row["tp_ratio_to_sweep"] = tp_ratio
 
 
 def tp_real_attain(b: dict, tp_fluid: float) -> float:
@@ -184,37 +353,57 @@ def write_csv(rows: list[dict], path: Path) -> None:
     if not rows:
         path.write_text("(empty)\n")
         return
-    fields = list(rows[0].keys())
+    # Use union of keys (EB rows carry extra sweep-annotation columns).
+    seen: list[str] = []
+    seen_set: set[str] = set()
+    for r in rows:
+        for k in r.keys():
+            if k not in seen_set:
+                seen.append(k)
+                seen_set.add(k)
     with open(path, "w") as f:
-        f.write(",".join(fields) + "\n")
+        f.write(",".join(seen) + "\n")
         for r in rows:
-            f.write(",".join(repr(r[k]) if isinstance(r[k], str) else f"{r[k]}"
-                              for k in fields) + "\n")
+            f.write(",".join(
+                repr(r[k]) if isinstance(r.get(k), str) else f"{r.get(k, '')}"
+                for k in seen
+            ) + "\n")
 
 
 def write_latex(rows: list[dict], path: Path, eps: float) -> None:
+    """Render the paper Table 1 row schema:
+    $\\hat\\theta_0$, $\\theta^*_{\\text{sweep}}$, $\\hat N$, TP ratio, OOM
+    (per cycle). Sweep columns are NaN if the k-sweep wasn't run at the
+    controller's $\\hat N$ (run_validation.sh's TABLE1 mode lines them up).
+    """
     eb_rows = [r for r in rows if r["scheduler"] == "eb"]
     eb_rows.sort(key=lambda r: ("decode_heavy", "balanced", "prefill_heavy").index(r["scenario"]))
+    def _fmt(v: float, spec: str, na: str = "TBD") -> str:
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            return na
+        return format(v, spec)
     with open(path, "w") as f:
         f.write("% Auto-generated by analyze_validation.py\n")
-        f.write("\\begin{tabular}{lrrrrrrr}\n")
+        f.write("\\begin{tabular}{lccccc}\n")
         f.write("\\toprule\n")
-        f.write("Workload & $\\hat p_0/p_0$ (\\%) & $\\hat\\mu_L/\\mu_L$ (\\%) "
-                "& $\\theta_0$ & $\\hat k$ & $\\hat N$ "
-                "& TP attain.\\ (\\%) & OOM rate (\\%) \\\\\n")
+        f.write("Workload & $\\hat\\theta_0$ & $\\theta^*_{\\text{sweep}}$ "
+                "& $\\hat N$ & TP ratio & OOM \\\\\n")
         f.write("\\midrule\n")
         for r in eb_rows:
-            f.write(f"{r['scenario']} & "
-                    f"{(1 - r['p_hat_relerr_pct']/100)*100:.1f} & "
-                    f"{(1 - r['mu_L_hat_relerr_pct']/100)*100:.1f} & "
-                    f"{r['theta_0_final']:.4f} & "
-                    f"{r['k_hat_final']} & "
+            tp_ratio = r.get("tp_ratio_to_sweep", float("nan"))
+            theta_sweep = r.get("theta_sweep_star", float("nan"))
+            tp_ratio_pct = (tp_ratio * 100) if isinstance(tp_ratio, (int, float)) and not math.isnan(tp_ratio) else float("nan")
+            oom_cycle_pct = r.get("oom_rate_cycle_steady_pct", float("nan"))
+            f.write(f"{r['scenario'].replace('_', '-')} & "
+                    f"{_fmt(r['theta_0_final'], '.3f')} & "
+                    f"{_fmt(theta_sweep, '.3f')} & "
                     f"{r['N_hat_final']} & "
-                    f"{r['attainment_pct']:.1f} & "
-                    f"{r['oom_rate_pct']:.2f} \\\\\n")
+                    f"{_fmt(tp_ratio_pct, '.1f')}\\% & "
+                    f"{_fmt(oom_cycle_pct, '.1f')}\\% \\\\\n")
         f.write("\\bottomrule\n")
         f.write("\\end{tabular}\n")
-        f.write(f"% Prescribed OOM tolerance ε = {eps}\n")
+        f.write(f"% Prescribed OOM tolerance ε = {eps} (per-cycle definition: "
+                f"fraction of decode cycles with any preemption).\n")
 
 
 def maybe_plot_traces(workload_dir: Path, scen: str, cfg: dict) -> None:
@@ -287,6 +476,7 @@ def main() -> int:
         rows.extend(summarise(wd, scen, cfg))
         maybe_plot_traces(wd, scen, cfg)
 
+    _annotate_sweep_optimum(rows)
     write_csv(rows, root / "validation_summary.csv")
     write_latex(rows, root / "validation_table.tex", eps)
     print(f"\nWrote {root / 'validation_summary.csv'}")
