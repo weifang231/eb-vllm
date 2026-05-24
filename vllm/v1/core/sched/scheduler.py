@@ -1749,7 +1749,17 @@ class Scheduler(SchedulerInterface):
         # --- Decision with hysteresis ---
         # signal = LHS - RHS; |signal| > δ triggers a switch
         signal = LHS - RHS
-        self._mode_switch_signal_window.append(signal)
+
+        # Drain-state filter: when N_obs is tiny (e.g., bench transitions, end-of-
+        # bench drain), RHS ∝ 1/N_obs spikes to ~1e-3 magnitude. These transient
+        # spikes (vs steady-state |signal| ~ 1e-5) pollute the rolling window's σ
+        # estimate, inflating adaptive δ by 100× and blocking legitimate switches
+        # in subsequent stable phases. We exclude such evaluations from the window.
+        n_drain_threshold = int(
+            os.environ.get("VLLM_PD_MODE_SWITCH_N_THRESHOLD", "16")
+        )
+        if N_obs >= n_drain_threshold:
+            self._mode_switch_signal_window.append(signal)
 
         if self._mode_switch_delta_adaptive and len(self._mode_switch_signal_window) >= 4:
             import statistics
@@ -1789,6 +1799,13 @@ class Scheduler(SchedulerInterface):
 
         if self._mode_cooldown > 0:
             self._mode_cooldown -= 1
+            return
+
+        # Drain-state decision gate: skip the switch when N_obs is in the
+        # transient/drain regime. RHS spikes here are not informative about
+        # the steady-state crossover and would cause spurious flips at phase
+        # boundaries (bench drain or admission re-balance).
+        if N_obs < n_drain_threshold:
             return
 
         old_mode = self._active_scheduler
@@ -2133,12 +2150,19 @@ class Scheduler(SchedulerInterface):
 
         elif self.pd_phase == 2:
             # Refill prefill -> decode when refill target met OR no more waiting
-            # OR KV cache is full (to prevent deadlock)
+            # OR KV cache is full (to prevent deadlock).
+            # ALSO escape when the running batch is at max capacity and we have
+            # decoding reqs to drain: in this state no new prefills can be
+            # admitted (max_num_running_reqs cap), and phase 2 only schedules
+            # prefills, so the engine deadlocks. Observed in mb→eb transition
+            # under heavy admission with BS=1024.
+            batch_full = len(self.running) >= self.max_num_running_reqs
             ready_to_decode = (
                 self.pd_prefilled_count >= self.pd_refill_target
                 or (not has_waiting and has_decoding)
                 or kv_cache_full
-            )  # KV cache full escape
+                or (batch_full and has_decoding)
+            )
             if ready_to_decode:
                 # When KV cache is full, must transition even with pending chunks
                 # to free memory. Proactively preempt them to free KV cache.
