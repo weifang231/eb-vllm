@@ -2421,8 +2421,10 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if request.num_cached_tokens < 0:
-                    request.num_cached_tokens = num_computed_tokens
+                # NOTE: upstream removed Request.num_cached_tokens; the old EB
+                # sentinel bookkeeping here was write-only (never read by any EB
+                # decision), so it is dropped. Prefix-cache hit counts are now
+                # surfaced via prefill_stats / RequestOutput.num_cached_tokens.
 
             if skipped:
                 self.waiting.prepend_requests(skipped)
