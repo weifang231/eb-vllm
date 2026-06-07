@@ -763,6 +763,173 @@ class RandomDataset(BenchmarkDataset):
         return prompt, total_input_len, token_mismatch
 
 
+class GeometricRandomDataset(RandomDataset):
+    """
+    Synthetic dataset for CFR (constant failure rate / constant hazard rate)
+    serving experiments.
+
+    Differs from RandomDataset only in how lengths are sampled:
+      - Output lengths follow a geometric distribution with parameter
+        p_0 = 1 / output_len so that E[output_len] = output_len.  This matches
+        the CFR regime under which the midpoint algorithm is derived.
+      - Input lengths are sampled uniformly from
+        [floor(input_len * (1 - range_ratio)),
+         ceil(input_len * (1 + range_ratio))]; range_ratio defaults to 0.5
+        as used in the paper's CFR experiments.
+
+    All other behaviour (token sequence generation, prefix handling, etc.)
+    is inherited unchanged from RandomDataset.
+    """
+
+    # Sensible defaults for the paper's CFR workloads.
+    DEFAULT_RANGE_RATIO = 0.5
+    # Maximum allowed output length to clip extreme tail draws of the
+    # geometric distribution (kept generous; tightened by the server's own
+    # max_model_len at inference time).
+    DEFAULT_OUTPUT_CLIP = 8192
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        prefix_len: int = RandomDataset.DEFAULT_PREFIX_LEN,
+        range_ratio: RangeRatio = DEFAULT_RANGE_RATIO,
+        input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
+        output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
+        batchsize: int = 1,
+        max_loras: int | None = None,
+        lora_path: str | None = None,
+        lora_assignment: str = "random",
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # Identical to RandomDataset.sample() except output lengths are drawn
+        # from a geometric distribution (CFR regime) and input lengths from a
+        # uniform interval around input_len.
+        resolved_input_rr, _ = _resolve_range_ratios(range_ratio)
+
+        num_special = int(tokenizer.num_special_tokens_to_add())
+        real_input_len = max(0, int(input_len) - num_special)
+        min_sampled_input = math.floor(
+            real_input_len * (1.0 - float(resolved_input_rr))
+        )
+        min_total_input = int(prefix_len) + min_sampled_input
+        if min_total_input < 1:
+            raise ValueError(
+                "--random-input-len is too small: with tokenizer special "
+                f"tokens {num_special} and "
+                f"input range ratio {resolved_input_rr}, "
+                "the minimum possible total input tokens (prefix + sampled) is "
+                f"{min_total_input}. Increase --random-input-len and/or "
+                "--random-prefix-len, or decrease the input range ratio."
+            )
+
+        input_lens, output_lens, offsets = self._geometric_sampling_params(
+            num_requests, resolved_input_rr, input_len, output_len, tokenizer
+        )
+
+        vocab_size = tokenizer.vocab_size
+        prohibited_tokens = tokenizer.all_special_ids
+        all_tokens = np.arange(vocab_size)
+        allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
+
+        # Generate prefix once
+        prefix_token_ids = self.get_prefix(tokenizer, allowed_tokens, prefix_len)
+
+        requests = []
+        token_mismatch_total = 0
+        for i in range(num_requests):
+            prompt, total_input_len, token_mismatch = self.generate_token_sequence(  # noqa: E501
+                tokenizer=tokenizer,
+                prefix_token_ids=prefix_token_ids,
+                prefix_len=prefix_len,
+                vocab_size=vocab_size,
+                input_len=int(input_lens[i]),
+                offset=int(offsets[i]),
+                index=i,
+                allowed_tokens=allowed_tokens,
+            )
+            token_mismatch_total += token_mismatch
+            lora_req = self.get_lora_request(
+                index=i,
+                max_loras=max_loras,
+                lora_path=lora_path,
+                lora_assignment=lora_assignment,
+            )
+            requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=total_input_len,
+                    expected_output_len=int(output_lens[i]),
+                    lora_request=lora_req,
+                    request_id=request_id_prefix + str(i),
+                )
+            )
+
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
+
+        return requests
+
+    def _geometric_sampling_params(
+        self,
+        num_requests: int,
+        input_range_ratio: float,
+        input_len: int,
+        output_len: int,
+        tokenizer: TokenizerLike,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if not (0.0 <= input_range_ratio < 1.0):
+            raise ValueError("input_range_ratio must be in [0, 1).")
+        if output_len <= 0:
+            raise ValueError("output_len must be positive for geometric sampling.")
+
+        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
+        real_input_len = max(0, int(input_len) - num_special_tokens)
+        input_low = math.floor(real_input_len * (1 - input_range_ratio))
+        input_high = math.ceil(real_input_len * (1 + input_range_ratio))
+        if input_low > input_high:
+            raise ValueError(
+                f"Invalid input sampling interval: low={input_low} > "
+                f"high={input_high}"
+            )
+
+        # Geometric output lengths with mean = output_len.
+        # numpy's geometric returns values in {1, 2, ...} (shifted geom),
+        # which has mean 1/p, matching E[O] = output_len when p = 1/output_len.
+        p_geom = 1.0 / float(output_len)
+        # Clip is a defensive bound on the heavy right tail.
+        clip = int(max(output_len * 16, self.DEFAULT_OUTPUT_CLIP))
+
+        input_lens = self._rng.integers(input_low, input_high + 1, size=num_requests)
+        output_lens = self._rng.geometric(p=p_geom, size=num_requests).astype(np.int64)
+        np.clip(output_lens, 1, clip, out=output_lens)
+        offsets = self._rng.integers(0, tokenizer.vocab_size, size=num_requests)
+
+        logger.info(
+            "Sampling input_len from [%s, %s] (uniform); "
+            "output_len ~ Geometric(p=%.6f) with E[O]=%s "
+            "(realised mean=%.1f, max=%d, clip=%d)",
+            input_low,
+            input_high,
+            p_geom,
+            output_len,
+            float(output_lens.mean()),
+            int(output_lens.max()),
+            clip,
+        )
+        return input_lens, output_lens, offsets
+
+
 # -----------------------------------------------------------------------------
 # Random Dataset Implementation (Synthetic Data)
 # -----------------------------------------------------------------------------
@@ -1605,6 +1772,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "random",
             "random-mm",
             "random-rerank",
+            "geometric_random",
             "hf",
             "custom",
             "custom_audio",
@@ -2355,6 +2523,21 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 batchsize=args.random_batch_size,
                 no_oversample=args.no_oversample,
             ),
+            "geometric_random": lambda: GeometricRandomDataset(
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                disable_shuffle=args.disable_shuffle,
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                prefix_len=args.random_prefix_len,
+                input_len=args.random_input_len,
+                output_len=args.random_output_len,
+                range_ratio=args.random_range_ratio,
+                request_id_prefix=args.request_id_prefix,
+                batchsize=args.random_batch_size,
+                no_oversample=args.no_oversample,
+            ),
             "random-mm": lambda: RandomMultiModalDataset(
                 random_seed=args.seed,
                 dataset_path=args.dataset_path,
@@ -2522,19 +2705,28 @@ class CustomDataset(BenchmarkDataset):
             else:
                 new_output_len = output_len
                 if output_len is None or output_len == -1:
-                    # check that the request has an 'output_tokens' field
-                    if "output_tokens" not in item:
+                    # Use the per-request output length from the data. Accept
+                    # either 'output_tokens' (upstream) or 'output_len' (written
+                    # by the eb-vllm reproduce/ dataset exporter).
+                    output_field = (
+                        "output_tokens"
+                        if "output_tokens" in item
+                        else "output_len"
+                        if "output_len" in item
+                        else None
+                    )
+                    if output_field is None:
                         raise ValueError(
-                            "If no output length is provided the "
-                            "custom dataset must contain an 'output_tokens' field."
+                            "If no output length is provided the custom dataset "
+                            "must contain an 'output_tokens' (or 'output_len') field."
                         )
                     # Use number of output tokens from the request data
                     try:
-                        new_output_len = int(item["output_tokens"])
+                        new_output_len = int(item[output_field])
                     except (ValueError, TypeError) as e:
                         raise ValueError(
-                            f"Invalid value for 'output_tokens' in custom dataset: "
-                            f"'{item['output_tokens']}'. Must be an integer."
+                            f"Invalid value for '{output_field}' in custom dataset: "
+                            f"'{item[output_field]}'. Must be an integer."
                         ) from e
 
             if tokenizer is None:
