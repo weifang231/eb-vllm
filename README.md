@@ -1,110 +1,190 @@
-<!-- markdownlint-disable MD001 MD041 -->
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">
-    <img alt="vLLM" src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-light.png" width=55%>
-  </picture>
-</p>
+# eb-vllm
 
-<h3 align="center">
-Easy, fast, and cheap LLM serving for everyone
-</h3>
+**EB⁺ — adaptive hybrid batching for LLM inference.** A vLLM v1 extension that online-selects between exclusive batching (EB) and mixed batching (MB) using a closed-form crossover condition, matching or exceeding vLLM v1 across every tested hardware × workload combination.
 
-<p align="center">
-| <a href="https://docs.vllm.ai"><b>Documentation</b></a> | <a href="https://blog.vllm.ai/"><b>Blog</b></a> | <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> | <a href="https://x.com/vllm_project"><b>Twitter/X</b></a> | <a href="https://discuss.vllm.ai"><b>User Forum</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> |
-</p>
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Built on vLLM](https://img.shields.io/badge/Built%20on-vLLM%20v1-orange.svg)](https://github.com/vllm-project/vllm)
+[![Paper](https://img.shields.io/badge/Paper-ICML%202026-red.svg)](#citation)
 
-🔥 We have built a vLLM website to help you get started with vLLM. Please visit [vllm.ai](https://vllm.ai) to learn more.
-For events, please visit [vllm.ai/events](https://vllm.ai/events) to join us.
+> Zhang, Nie, Pang, Ma, Wu. *Threshold-Based Exclusive Batching for Memory-Bandwidth-Constrained LLM Inference.* ICML 2026.
 
 ---
 
-## About
+## 📋 What's in this repo
 
-vLLM is a fast and easy-to-use library for LLM inference and serving.
+<img src="assets/eb_vllm_header.png" width="900" alt="EB+ outperforms MB on bandwidth-constrained GPUs">
 
-Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has grown into one of the most active open-source AI projects built and maintained by a diverse community of many dozens of academic institutions and companies from over 2000 contributors.
+Mixed batching (MB) — interleaving prefill and decode in the same iteration — is vLLM v1's default. We show that **whether MB or exclusive batching (EB) wins is governed by GPU memory bandwidth**, derive a **closed-form crossover condition**, and ship:
 
-vLLM is fast with:
+* **🏆 EB⁺ (recommended)** — a hybrid scheduler that applies the crossover condition online to switch between EB and MB at every update tick. **Matches or exceeds v1 (MB) in every tested scenario (worst case: −0.4%)** and requires **no manual tuning**.
+* **EB(k̂\*)** — the underlying exclusive-batching component, with an *asymptotically optimal*, online-calibrated phase-switching threshold k̂\* and memory-safe batch size N̂\*. Available as a standalone scheduler when you've profiled your hardware as bandwidth-constrained.
 
-- State-of-the-art serving throughput
-- Efficient management of attention key and value memory with [**PagedAttention**](https://blog.vllm.ai/2023/06/20/vllm.html)
-- Continuous batching of incoming requests, chunked prefill, prefix caching
-- Fast and flexible model execution with piecewise and full CUDA/HIP graphs
-- Quantization: FP8, MXFP8/MXFP4, NVFP4, INT8, INT4, GPTQ/AWQ, GGUF, compressed-tensors, ModelOpt, TorchAO, and [more](https://docs.vllm.ai/en/latest/features/quantization/index.html)
-- Optimized attention kernels including FlashAttention, FlashInfer, TRTLLM-GEN, FlashMLA, and Triton
-- Optimized GEMM/MoE kernels for various precisions using CUTLASS, TRTLLM-GEN, CuTeDSL
-- Speculative decoding including n-gram, suffix, EAGLE, DFlash
-- Automatic kernel generation and graph-level transformations using torch.compile
-- Disaggregated prefill, decode, and encode
+### 📊 Headline results (Qwen3-8B, WildChat workload)
 
-vLLM is flexible and easy to use with:
+EB⁺ vs vLLM v1 (MB) — EB⁺ adaptively picks the better of {EB, MB} per regime:
 
-- Seamless integration with popular Hugging Face models
-- High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-- Tensor, pipeline, data, expert, and context parallelism for distributed inference
-- Streaming outputs
-- Generation of structured outputs using xgrammar or guidance
-- Tool calling and reasoning parsers
-- OpenAI-compatible API server, plus Anthropic Messages API and gRPC support
-- Efficient multi-LoRA support for dense and MoE layers
-- Support for NVIDIA GPUs, AMD GPUs, and x86/ARM/PowerPC CPUs. Additionally, diverse hardware plugins such as Google TPUs, Intel Gaudi, IBM Spyre, Huawei Ascend, Rebellions NPU, Apple Silicon, MetaX GPU, and more.
+| Hardware | Throughput vs v1 (MB) | TPOT vs v1 (MB) |
+|---|---|---|
+| L40S (0.864 TB/s) | **+41.9%** | **−27.2%** |
+| RTX PRO 6000 (1.792 TB/s) | **+11.3%** | **−34.7%** |
+| H200 (4.8 TB/s) | **+3.0%** | **−35.7%** |
+| B300 (8.0 TB/s) | **+3.7%** | **−7.8%** |
+| Non-stationary traffic (RTX PRO 6000) | **+36.4%** (distribution shift) | **−43%** (distribution shift) |
 
-vLLM seamlessly supports 200+ model architectures on Hugging Face, including:
+Source: paper §4.3–§4.5. EB⁺ recovers the underlying EB(k̂\*) gains on bandwidth-constrained GPUs (L40S, RTX PRO 6000) and stays competitive on high-bandwidth GPUs (H200, B300) by tracking whichever single-mode scheduler wins each regime.
 
-- Decoder-only LLMs (e.g., Llama, Qwen, Gemma)
-- Mixture-of-Expert LLMs (e.g., Mixtral, DeepSeek-V3, Qwen-MoE, GPT-OSS)
-- Hybrid attention and state-space models (e.g., Mamba, Qwen3.5)
-- Multi-modal models (e.g., LLaVA, Qwen-VL, Pixtral)
-- Embedding and retrieval models (e.g., E5-Mistral, GTE, ColBERT)
-- Reward and classification models (e.g., Qwen-Math)
+---
 
-Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).
+## 🏆 EB⁺: hybrid wins everywhere
 
-## Getting Started
+EB(k̂\*) alone is **highly effective on bandwidth-constrained GPUs and at high concurrency**, but it has a known weakness: at low concurrency, when there is not enough decode work to keep the phase-switching pipeline busy, EB pays a cold-start cost that MB does not. **EB⁺ fixes this by evaluating the closed-form crossover condition online and picking the better of {EB, MB} at every update tick.**
 
-Install vLLM with [`uv`](https://docs.astral.sh/uv/) (recommended) or `pip`:
+<img src="assets/eb_plus_advantage.png" width="900" alt="EB+ matches or exceeds v1 across moderate-to-high traffic and non-stationary workloads">
+
+The figure above evaluates two regimes:
+
+* **Traffic-level sensitivity** (paper Table 4). Concurrency sweep at μ\_L=512, μ\_O=256. At c=32 EB(k̂\*) is slightly TTFT-handicapped, so EB⁺ stays in MB and matches v1. At c=512–2048 EB⁺ commits to EB and gains **+50–63%** over v1 on RTX PRO 6000, with **1.8× lower TPOT**.
+* **Non-stationary workloads** (paper Table 5). Under sudden distribution shifts (μ\_L:1024→512→128, μ\_O:128→512→1024) or concurrency shifts (c:32→512→1024→256→2048), EB⁺ adapts online and **matches or exceeds EB(k̂\*) in all 4 (hardware × scenario) cells**, including +36.4% over v1 on RTX PRO 6000 under distribution shift.
+
+EB⁺ requires **no manual tuning**: the cost-model parameters (α\_p, α\_d, β\_p, β\_d, α\_MB, β\_MB\^e) are calibrated once per (model, GPU) in minutes; runtime updates are pure integer arithmetic.
+
+---
+
+## 📦 Installation
 
 ```bash
-uv pip install vllm
+git clone https://github.com/weifang231/eb-vllm.git
+cd eb-vllm
+python -m venv .venv && source .venv/bin/activate
+pip install torch                                       # match your CUDA
+VLLM_USE_PRECOMPILED=1 pip install -e . --no-build-isolation
+                            # ~30 s; fetches all 8 .so (incl. FA3) from
+                            # the official vLLM wheel — see warning below
 ```
 
-Or [build from source](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/index.html#build-wheel-from-source) for development.
+> **⚠ Do NOT drop `VLLM_USE_PRECOMPILED=1` on Hopper GPUs (H100/H200/H800).**
+> A locally-compiled `vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so` causes a
+> ~10× throughput regression on Hopper (measured H200 + Qwen3-8B ShareGPT:
+> 15.6 → 1.5 RPS, TPOT 339 ms → 4158 ms). On non-Hopper GPUs (A100/A6000/
+> L40/RTX 6000 Blackwell/...) vLLM uses FA2 and the local FA3 build is
+> inert, but using `VLLM_USE_PRECOMPILED=1` is still recommended — it
+> skips the 15–25 min CUDA compile and guarantees CI-validated binaries.
+> eb-vllm's diff vs upstream vLLM is **pure-Python** (`vllm/v1/core/sched/`
+> + `reproduce/`), so the upstream precompiled .so are ABI-compatible.
+> Only build locally if you modified `csrc/`; on Hopper, overwrite the
+> resulting `_vllm_fa3_C.abi3.so` with the version from the official wheel.
 
-Visit our [documentation](https://docs.vllm.ai/en/latest/) to learn more.
+The new scheduler code lives in [`vllm/v1/core/sched/`](vllm/v1/core/sched/). Reproduction scripts in [`reproduce/`](reproduce/).
 
-- [Installation](https://docs.vllm.ai/en/latest/getting_started/installation.html)
-- [Quickstart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)
-- [List of Supported Models](https://docs.vllm.ai/en/latest/models/supported_models.html)
+## 🚀 Quick start
 
-## Contributing
+**Recommended — run EB⁺** (auto-selects between EB and MB based on the crossover diagnostic):
 
-We welcome and value any contributions and collaborations.
-Please check out [Contributing to vLLM](https://docs.vllm.ai/en/latest/contributing/index.html) for how to get involved.
+```bash
+VLLM_USE_PD_SCHEDULER=1 \
+VLLM_PD_SCHEDULER_MODE=auto \
+VLLM_PD_K_MODE=ifr \
+VLLM_PD_AUTO_COMPUTE_N=1 \
+VLLM_PD_OOM_TOLERANCE=0.01 \
+VLLM_PD_CALIBRATION_FILE=reproduce/calibration/pd_calibration_Qwen3-8B_H200.json \
+vllm serve Qwen/Qwen3-8B --max-num-seqs 1024
+```
 
-## Citation
+This is what you should reach for by default. EB⁺ does the hardware-aware thing automatically; you don't need to know whether your GPU is bandwidth-constrained.
 
-If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
+<details>
+<summary><strong>Advanced — run pure EB(k̂*)</strong> (always exclusive batching, no MB fallback)</summary>
+
+If you've already profiled your hardware as memory-bandwidth-bound and want to skip the online crossover check, you can pin the scheduler to EB only:
+
+```bash
+VLLM_USE_PD_SCHEDULER=1 \
+VLLM_PD_K_MODE=ifr \
+VLLM_PD_AUTO_COMPUTE_N=1 \
+VLLM_PD_OOM_TOLERANCE=0.01 \
+VLLM_PD_CALIBRATION_FILE=reproduce/calibration/pd_calibration_Qwen3-8B_H200.json \
+vllm serve Qwen/Qwen3-8B --max-num-seqs 1024
+```
+
+The only difference from the EB⁺ command is the absence of `VLLM_PD_SCHEDULER_MODE=auto`. At low load this can underperform v1 (see the [EB⁺ section](#-eb-hybrid-wins-everywhere) above); use only if you understand the trade-off.
+
+</details>
+
+`VLLM_PD_CALIBRATION_FILE` points to a per-(model, GPU) cost-model calibration JSON. We ship a sample for Qwen3-8B on H200; see [`reproduce/calibration/README.md`](reproduce/calibration/README.md) for how to generate one for your hardware (a few minutes of GPU time).
+
+## ⚙️ How it works
+
+EB⁺ is a thin online controller wrapped around two batching modes (EB and MB). At every update tick it evaluates a single scalar — the crossover diagnostic $\Delta(N)$ — and routes to whichever mode the diagnostic predicts will win.
+
+### Phase machine (when EB⁺ runs in EB mode)
+
+When the crossover favors exclusive batching, EB⁺ never mixes prefill and decode. The batch oscillates between two phases, and the # of decoding requests follows a sawtooth between $N$ and $N - \hat{k}^*$:
+
+<img src="assets/eb_phase_machine.png" width="900" alt="EB inventory dynamics: batch oscillates between N and N-k̂*">
+
+* **Phase 1 (Decode).** All $N$ active requests advance by one token each iteration. The scheduler counts completions; once the proportion of finished slots meets the closed-form ratio $\theta^* / (1 - \theta^*)$ — equivalently, $\hat{k}^*$ requests have completed — it triggers a switch.
+* **Phase 2 (Refill).** The scheduler prefills exactly $\hat{k}^*$ new requests into the vacated slots, then returns to decode with the batch refilled back to $N$.
+* **Cold start.** Phase 0 (not shown) runs once on startup to populate the initial $N$ requests; afterwards the system stays in the Phase 1 ↔ Phase 2 cycle.
+
+This separation eliminates the prefill–decode bandwidth contention that limits MB on memory-bound GPUs. When the diagnostic instead favors MB (high-bandwidth GPUs, very low load), EB⁺ stays in vLLM v1's mixed-batching path and skips the phase machine entirely.
+
+### Closed-form ingredients
+
+Three closed-form derivations from the paper drive the controller:
+
+1. **Phase-switching threshold (Prop. 1, Thm. 2):** $k^*/N \to \theta^* = \theta_0 + \Delta\theta + O(\eta^2)$, where the CFR base $\theta_0$ solves $\theta_0 / (1 - \theta_0) + \ln(1 - \theta_0) = p_0 \alpha_p / \alpha_d$ (Prop. 1) and $\Delta\theta$ is the $O(\eta)$ IFR correction (Thm. 2). Solved by bisection in `_compute_optimal_ratio` / `_compute_optimal_ratio_ifr`.
+2. **Memory-safe batch size (Prop. 3):**
+
+    $$\hat{N}^* = \left\lfloor \frac{C - \nu \ln(1/\epsilon)}{\mu_L + \frac{1-\theta}{\theta p_0}\ln\frac{1}{1-\theta}} \right\rfloor, \qquad \nu = \frac{1}{p_0^2 \mu_L}$$
+
+    ensures OOM probability ≤ ε. Implemented in `_compute_memory_safe_n` (using an asymptotically equivalent CLT-type refinement that is tighter at moderate $N$; see the in-file docstring at `scheduler.py:780`).
+3. **EB–MB crossover (Prop. 4):** the sign of a single scalar Δ(N) determines which strategy wins; computed in `_compute_diagnostic_delta`.
+
+The full online controller (`_update_params_online`) runs in two paths: a **hot path** (per-request, pure integer arithmetic) and a **cold path** (every M completions, computes EMA / hazard-rate fit / θ\* update). See [`vllm/v1/core/sched/scheduler.py`](vllm/v1/core/sched/scheduler.py) for the implementation.
+
+## 🧪 Reproducing the paper
+
+See [`reproduce/REPRODUCE.md`](reproduce/REPRODUCE.md) for the end-to-end recipe with expected wall-clock times. Per-section subdirectories contain the runner scripts, analysis tools, and plot scripts for each figure/table:
+
+| Paper section | Subdirectory |
+|---|---|
+| §4.2 Controller validation (Fig. 3) | [`reproduce/validation/`](reproduce/validation/) |
+| §4.3.1 Synthetic e2e (Fig. 4) | [`reproduce/synthetic_e2e/`](reproduce/synthetic_e2e/) |
+| §4.3.2 Real workloads (Tables 2–3, Figs. 5–6) | [`reproduce/real_workloads/`](reproduce/real_workloads/) |
+| §4.4 EB⁺ traffic-level (Table 4) | [`reproduce/eb_plus/traffic/`](reproduce/eb_plus/traffic/) |
+| §4.4 EB⁺ non-stationary (Table 5) | [`reproduce/eb_plus/non_stationary/`](reproduce/eb_plus/non_stationary/) |
+| §4.5 Cross-GPU / cross-model (Table 6, Fig. 7) | [`reproduce/scalability/`](reproduce/scalability/) |
+
+The README figures are generated by the scripts under [`assets/`](assets/) (`make_header_figure.py`, `make_eb_plus_figure.py`, `make_phase_machine_figure.py`); rerun any of them to regenerate the corresponding PNG.
+
+## 📁 Repository layout
+
+```
+eb-vllm/
+├── vllm/v1/core/sched/        # Our scheduler additions
+│   ├── scheduler.py           # EB+ controller + EB phase machine
+│   ├── calibration.py         # Online (k̂*, N̂*) cost-model estimation
+│   └── ...
+├── reproduce/                 # Paper reproduction harness (per-section subdirs)
+├── assets/                    # README figures and helper scripts
+└── ...                        # Upstream vLLM files (CMakeLists, csrc/, tests/, ...)
+```
+
+## 📝 Citation
 
 ```bibtex
-@inproceedings{kwon2023efficient,
-  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
-  author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
-  booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
-  year={2023}
+@inproceedings{zhang2026eb,
+  title     = {Threshold-Based Exclusive Batching for Memory-Bandwidth-Constrained LLM Inference},
+  author    = {Zhang, Weifang and Nie, Yuzhou and Pang, Bowen and Ma, Guangrui and Wu, Shining},
+  booktitle = {Proceedings of the 43rd International Conference on Machine Learning},
+  year      = {2026}
 }
 ```
 
-## Contact Us
+## ⚖️ License
 
-<!-- --8<-- [start:contact-us] -->
-- For technical questions and feature requests, please use GitHub [Issues](https://github.com/vllm-project/vllm/issues)
-- For discussing with fellow users, please use the [vLLM Forum](https://discuss.vllm.ai)
-- For coordinating contributions and development, please use [Slack](https://slack.vllm.ai)
-- For security disclosures, please use GitHub's [Security Advisories](https://github.com/vllm-project/vllm/security/advisories) feature
-- For collaborations and partnerships, please contact us at [collaboration@vllm.ai](mailto:collaboration@vllm.ai)
-<!-- --8<-- [end:contact-us] -->
+Apache-2.0, inherited from upstream vLLM. See [`LICENSE`](LICENSE).
 
-## Media Kit
+## 🙏 Acknowledgement
 
-- If you wish to use vLLM's logo, please refer to [our media kit repo](https://github.com/vllm-project/media-kit)
+Built on [vLLM](https://github.com/vllm-project/vllm). We thank the vLLM community for the foundational serving infrastructure.

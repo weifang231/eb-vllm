@@ -3,17 +3,9 @@
 
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/*
-!vllm/vllm_flash_attn/__init__.py
-!vllm/vllm_flash_attn/flash_attn_interface.py
 
 # OpenAI triton kernels copied from source
 vllm/third_party/triton_kernels/*
-
-# FlashMLA interface copied from source
-vllm/third_party/flashmla/flash_mla_interface.py
-
-# DeepGEMM vendored package built from source
-vllm/third_party/deep_gemm/
 
 # triton jit
 .triton
@@ -26,13 +18,9 @@ __pycache__/
 # C extensions
 *.so
 
-# Rust binaries
-vllm/vllm-rs
-
 # Distribution / packaging
 .Python
 build/
-!requirements/build/
 cmake-build-*/
 CMakeUserPresets.json
 develop-eggs/
@@ -115,7 +103,7 @@ uv.lock
 # pyenv
 #   For a library or package, you might want to ignore these files since the code is
 #   intended to run in multiple environments; otherwise, check them in:
-.python-version
+# .python-version
 
 # pipenv
 #   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
@@ -196,13 +184,12 @@ cython_debug/
 .vscode/
 
 # Claude
+CLAUDE.md
 .claude/
 
 # Codex
+AGENTS.md
 .codex/
-
-# Cursor
-.cursor/
 
 # DS Store
 .DS_Store
@@ -240,12 +227,61 @@ ep_kernels_workspace/
 
 # Allow tracked library source folders under submodules (e.g., benchmarks/lib)
 !vllm/benchmarks/lib/
-!.buildkite/scripts/lib/
 
-# Generated gRPC protobuf files (compiled at build time from vllm_engine.proto)
-vllm/grpc/vllm_engine_pb2.py
-vllm/grpc/vllm_engine_pb2_grpc.py
-vllm/grpc/vllm_engine_pb2.pyi
+# Reproduction experiment outputs (multi-GB; never commit)
+reproduce/outputs/
+reproduce/**/outputs/
+reproduce/**/logs/
+reproduce/_logs/
 
-# Ignore generated cpu headers 
-csrc/cpu/cpu_attn_dispatch_generated.h
+# Benchmark result JSONs scattered under reproduce/
+reproduce/**/bench_*.json
+reproduce/**/*_stats.json
+reproduce/**/experiment_config.json
+reproduce/**/experiment_config_v2.json
+reproduce/**/validation_summary.csv
+reproduce/**/selector_summary.csv
+reproduce/**/optimal_per_scheduler.csv
+reproduce/**/progress.txt
+reproduce/**/experiment_queue.txt
+
+# Auto-generated paper figures (re-rendered from scripts; commit the source)
+reproduce/**/fig_*.pdf
+reproduce/**/fig_*.png
+reproduce/**/*_reproduced.pdf
+reproduce/**/*_comparison.pdf
+reproduce/**/*_comparison.png
+reproduce/**/*_new.pdf
+reproduce/**/*_new.png
+reproduce/scalability/scalmodel.pdf
+
+# Local re-runs of paper benchmarks (e.g. *_repro.json/png/pdf produced when
+# a developer regenerates a figure to sanity-check; the committed reference
+# results — results_h200.json etc. — stay in git, the *_repro.* don't).
+reproduce/**/*_repro.json
+reproduce/**/*_repro.png
+reproduce/**/*_repro.pdf
+
+# Personal local venv backups (e.g. .venv.symlink_backup left over from
+# swapping a symlinked venv for a real one).
+.venv.symlink_backup
+.venv.symlink_backup/
+.venv.bak/
+.venv*.bak
+
+# Calibration JSONs: tiny (~500 bytes) and reference values are committed;
+# new ones (generated locally per (model, GPU)) are tracked too if you want
+# them shared. Override per-file with .gitignore if needed.
+# Vestigial: Mistral-7B-v0.1 (base) and Mistral-7B-Instruct-v0.1 were tried
+# during development as fallbacks before settling on the paper's actual
+# scalability set (Mathstral-7B-v0.1 + the other 3 cross-model entries).
+# Paper does NOT use either Mistral variant — these calibrations shouldn't
+# ship.
+reproduce/calibration/pd_calibration_Mistral-7B-v0.1_*.json
+reproduce/calibration/pd_calibration_Mistral-7B-Instruct-v0.1_*.json
+
+# Downloaded benchmark datasets (hundreds of MB; fetched on demand, never commit)
+reproduce/ShareGPT*.json
+reproduce/**/ShareGPT*.json
+reproduce/wildchat_multiturn.json
+reproduce/**/wildchat_multiturn.json
