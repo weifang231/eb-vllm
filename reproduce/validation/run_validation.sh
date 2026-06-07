@@ -183,8 +183,21 @@ run_experiment() {
 
     wait_for_gpu_memory "$gpu_id" 60 || return 1
 
+    # Pin each concurrent server to a disjoint CPU-core slice. On large
+    # many-core (192-core) NUMA hosts, multiple vLLM workers calling
+    # sched_setaffinity() concurrently can deadlock in the kernel
+    # (affine_move_task); disjoint pinning avoids the cross-process
+    # contention. Override with EB_CORES_PER_SERVER / disable with =0.
+    local _serve_prefix=""
+    local _cps=${EB_CORES_PER_SERVER:-$(( $(nproc) / 8 ))}
+    if [ "$_cps" -gt 0 ]; then
+        local _lo=$(( (gpu_id % 8) * _cps ))
+        local _hi=$(( _lo + _cps - 1 ))
+        _serve_prefix="taskset -c ${_lo}-${_hi}"
+    fi
+
     VLLM_SCHEDULE_STATS_FILE="${result_dir}/${sched}_stats.json" \
-    vllm serve "$MODEL" \
+    $_serve_prefix vllm serve "$MODEL" \
         --port "$port" \
         --gpu-memory-utilization 0.9 \
         --max-num-seqs "$bs" \

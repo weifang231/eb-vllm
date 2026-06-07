@@ -2530,12 +2530,27 @@ class Scheduler(SchedulerInterface):
                 )
             )
 
-        new_reqs_data = [
-            NewRequestData.from_request(
-                req, req_to_new_blocks[req.request_id].get_block_ids()
-            )
-            for req in scheduled_new_reqs
-        ]
+        # Mirror _schedule_default: the v2 model runner treats resumed
+        # requests as new and requires prefill_token_ids (req._all_token_ids)
+        # on each NewRequestData (asserted in gpu/model_runner.add_requests).
+        if self.use_v2_model_runner:
+            scheduled_new_reqs = scheduled_new_reqs + scheduled_resumed_reqs
+            scheduled_resumed_reqs = []
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req,
+                    req_to_new_blocks[req.request_id].get_block_ids(),
+                    req._all_token_ids,
+                )
+                for req in scheduled_new_reqs
+            ]
+        else:
+            new_reqs_data = [
+                NewRequestData.from_request(
+                    req, req_to_new_blocks[req.request_id].get_block_ids()
+                )
+                for req in scheduled_new_reqs
+            ]
 
         cached_reqs_data = self._make_cached_request_data(
             scheduled_running_reqs,
