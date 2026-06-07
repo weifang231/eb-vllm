@@ -311,53 +311,6 @@ class Scheduler(SchedulerInterface):
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
 
-    def _mamba_block_aligned_split(
-        self,
-        request: Request,
-        num_new_tokens: int,
-        num_new_local_computed_tokens: int = 0,
-        num_external_computed_tokens: int = 0,
-    ) -> int:
-        num_computed_tokens = (
-            request.num_computed_tokens
-            + num_new_local_computed_tokens
-            + num_external_computed_tokens
-        )
-        # Perform block-aligned splitting at prefill phase, including:
-        # * non-resumed requests: num_computed_tokens < num_prompt_tokens + 0
-        # * resumed requests: num_computed_tokens < (
-        #                       num_prompt_tokens + num_output_tokens
-        #                     )
-        # NOTE: Use `request.num_tokens - 1` to bypass normal decoding.
-        if num_computed_tokens < max(request.num_prompt_tokens, request.num_tokens - 1):
-            # To enable block-aligned caching of the Mamba state, `num_new_tokens`
-            # must be a multiple of `block_size`.
-            # As an exception, if `num_new_tokens` is less than `block_size`, the
-            # state is simply not cached, requiring no special handling.
-            # Additionally, when Eagle mode is enabled, FullAttn prunes the last
-            # matching block. To prevent this from causing a Mamba cache miss, the
-            # last chunk must be not smaller than `block_size`.
-            block_size = self.cache_config.block_size
-            last_cache_position = request.num_tokens - request.num_tokens % block_size
-            # eagle prune
-            if self.use_eagle:
-                last_cache_position = max(last_cache_position - block_size, 0)
-            num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
-            if num_computed_tokens_after_sched < last_cache_position:
-                # align to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
-            elif (
-                num_computed_tokens
-                < last_cache_position
-                < num_computed_tokens_after_sched
-            ):
-                # force to cache the last chunk
-                num_new_tokens = last_cache_position - num_computed_tokens
-            else:
-                # prefill the last few tokens
-                pass
-        return num_new_tokens
-
         # Scheduler mode: "v1" (default; vLLM v1 mixed-batching), "eb"
         # (pure exclusive batching), "auto" (EB+, the v1↔eb crossover scheduler).
         # VLLM_PD_SCHEDULER_MODE takes precedence over VLLM_USE_PD_SCHEDULER.
@@ -741,6 +694,53 @@ class Scheduler(SchedulerInterface):
         # Register atexit handler to save stats on shutdown
         if self._schedule_stats_enabled:
             atexit.register(self._save_stats_on_exit)
+
+    def _mamba_block_aligned_split(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        num_new_local_computed_tokens: int = 0,
+        num_external_computed_tokens: int = 0,
+    ) -> int:
+        num_computed_tokens = (
+            request.num_computed_tokens
+            + num_new_local_computed_tokens
+            + num_external_computed_tokens
+        )
+        # Perform block-aligned splitting at prefill phase, including:
+        # * non-resumed requests: num_computed_tokens < num_prompt_tokens + 0
+        # * resumed requests: num_computed_tokens < (
+        #                       num_prompt_tokens + num_output_tokens
+        #                     )
+        # NOTE: Use `request.num_tokens - 1` to bypass normal decoding.
+        if num_computed_tokens < max(request.num_prompt_tokens, request.num_tokens - 1):
+            # To enable block-aligned caching of the Mamba state, `num_new_tokens`
+            # must be a multiple of `block_size`.
+            # As an exception, if `num_new_tokens` is less than `block_size`, the
+            # state is simply not cached, requiring no special handling.
+            # Additionally, when Eagle mode is enabled, FullAttn prunes the last
+            # matching block. To prevent this from causing a Mamba cache miss, the
+            # last chunk must be not smaller than `block_size`.
+            block_size = self.cache_config.block_size
+            last_cache_position = request.num_tokens - request.num_tokens % block_size
+            # eagle prune
+            if self.use_eagle:
+                last_cache_position = max(last_cache_position - block_size, 0)
+            num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
+            if num_computed_tokens_after_sched < last_cache_position:
+                # align to block_size
+                num_new_tokens = num_new_tokens // block_size * block_size
+            elif (
+                num_computed_tokens
+                < last_cache_position
+                < num_computed_tokens_after_sched
+            ):
+                # force to cache the last chunk
+                num_new_tokens = last_cache_position - num_computed_tokens
+            else:
+                # prefill the last few tokens
+                pass
+        return num_new_tokens
 
     # Phase name constants for logging
     PD_PHASE_NAMES = {0: "INITIAL_PREFILL", 1: "DECODE", 2: "REFILL_PREFILL"}
