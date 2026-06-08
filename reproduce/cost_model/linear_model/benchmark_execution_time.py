@@ -128,7 +128,6 @@ class ExecutionTimeBenchmark:
             mm_features=None,
             sampling_params=SamplingParams(max_tokens=max_tokens),
             pooling_params=None,
-            eos_token_id=None,
             arrival_time=time.time(),
             lora_request=None,
             cache_salt=None,
