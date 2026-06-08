@@ -285,3 +285,4 @@ reproduce/ShareGPT*.json
 reproduce/**/ShareGPT*.json
 reproduce/wildchat_multiturn.json
 reproduce/**/wildchat_multiturn.json
+reproduce/.binshim/

@@ -1,66 +1,46 @@
-# Reproduction status — EB port on latest upstream vLLM
+# Reproduction status — EB/EB⁺ port on latest upstream vLLM (H200)
 
-Environment: branch `port-eb-onto-upstream` = `vllm-project/vllm@4dcd10eb0`
-(2026-06-07, latest fetched) + the EB/EB⁺ port (6 commits). 8×H200, editable
-precompiled install. Model: Qwen/Qwen3-8B.
+Branch `port-eb-onto-upstream` = `vllm-project/vllm@4dcd10eb0` + EB/EB⁺ port.
+8×H200, Qwen3-8B. Reproduced 2026-06-08.
 
-Box-specific workarounds (NOT EB issues; see commit messages):
-- `taskset -c <disjoint slice>` per concurrent vLLM server — concurrent
-  `sched_setaffinity()` calls deadlock the kernel on this 192-core host.
-- `VLLM_USE_FLASHINFER_SAMPLER=0` — avoids a runtime flashinfer JIT build.
-- Free GPUs only (production guard services occupy some GPUs).
+## Box-specific run infra (NOT EB issues)
 
-## §4.2 Controller validation (Fig. 3) — ✅ qualitatively reproduced
+A vLLM wrapper is installed as `.venv/bin/vllm` (real entry point → `vllm-real`). On this
+192-core host, concurrent vLLM processes deadlock the kernel in `sched_setaffinity`
+(OpenMP thread pinning). The wrapper fixes it for every vllm process:
+`OMP_PROC_BIND=false`, `OMP_NUM_THREADS=8`, `KMP_AFFINITY=disabled`, and taskset-pins
+`serve` to a per-GPU 24-core slice / `bench` to cores 0-15. Verified GPU-bound
+(32-core == 64-core throughput), so pinning does **not** throttle.
 
-Full sweep run: v1 + EB(k̂*) + 8-point fixed-k sweep × {decode_heavy, balanced,
-prefill_heavy}, 4000 prompts each, geometric (CFR) outputs. All 30 experiments
-completed, 0 failures. Throughput = total-token throughput (paper's metric).
+## Results vs paper (H200, Qwen3-8B)
 
-| Scenario | ours v1 | ours EB(k̂*) | ours best-k | EB vs best-k (ours / paper) | EB vs v1 (ours / paper) |
-|---|---:|---:|---:|---:|---:|
-| decode_heavy  | 12,460 | 13,332 | 13,374 | −0.3% / **+8.0%** | +7.0% / +12.5% |
-| balanced      | 19,418 | 20,599 | 20,625 | −0.1% / **+3.6%** | +6.1% / +7.3% |
-| prefill_heavy | 32,855 | 33,933 | 34,172 | −0.7% / **+0.6%** | +3.3% / +2.0% |
+| Section | Status | Result |
+|---|---|---|
+| §3 CFR/IFR figure | ✅ exact | deterministic formula plot |
+| §4.2 validation (Fig 3) | ✅ ran / ⚠️ margin | EB(k̂*) ties best-k (+0.1/−1.6/−0.4%); EB > v1. Paper's +8/+3.6/+0.6% margin does NOT reproduce — see diagnostic below. |
+| §4.3.1 synthetic e2e (Fig 4) | ✅ | 180/180, EB > v1 all 3 workloads (+2.4/+4.7/+2.5%). H200 margins small, as paper. |
+| §4.3.2/3 real workloads (Tables 2/3) | ✅ | sharegpt/longbench/numina/wildchat (v1+eb). EB ≈ v1 — matches the paper's **H200** column (not RTX-6000). longbench abs nearly exact (15.73 vs 15.77). |
+| §4.4 EB⁺ (Tables 4/5) | ✅ | traffic sweep c∈{32,512,2048} + non-stationary (dist/conc shift). Needs `VLLM_PD_MB_COST_A/B/C` exported from the beta_mb json (not auto-loaded). EB⁺ ≈ v1 on H200. |
+| §3 cost model (linear) | ✅ runs | fixed `EngineCoreRequest(eos_token_id=)` drift; multi-model R² aggregator needs all 7 models. |
 
-Findings:
-- **EB(k̂*) > v1 in all three workloads** (+3.3 … +7.0%), same direction as the
-  paper (+2.0 … +12.5%).
-- **EB(k̂*) ties the best fixed-k** (within ±0.7%) — reproduces Fig. 3's core
-  claim "EB(k̂*) matches the best fixed-k sweep without manual tuning."
-- We do NOT reproduce the paper's *margin over* best-k (+8.0/+3.6/+0.6%). Tested
-  both `VLLM_PD_AUTO_COMPUTE_N=0` (B=1024) and the paper-config
-  `AUTO_COMPUTE_N=1` (B=2048/1024/512, recovered from the original
-  REPRODUCTION_REPORT) — both give EB ≈ best-k here. Absolute decode-heavy
-  throughput is ~0.85× the paper's; balanced/prefill match within 3–4%.
-  Most likely cause: the latest upstream vLLM differs from the paper-time
-  build (scheduler/kernel changes), not the EB logic — EB runs correctly and
-  its online θ̂*/N̂* controller lands on the optimal operating point.
+The only metric that does not reproduce is the §4.2 EB-over-best-k **margin**. Everything
+else reproduces in direction and (mostly) magnitude. The large EB wins (+41.9%) are on the
+bandwidth-constrained RTX PRO 6000, which this box does not have — on high-bandwidth H200 the
+paper itself shows EB ≈ v1.
 
-## §3 Cost model (linear model) — ✅ runs (API fix)
+## §4.2 diagnostic — is the missing margin a port bug?  NO.
 
-`benchmark_execution_time.py` constructed `EngineCoreRequest(eos_token_id=...)`,
-a field upstream removed → fixed (dropped the kwarg). The single-model sweep
-runs; the multi-model aggregator `analyze_prefill_linearity_all.py` needs all
-7 models' result files (out of scope for a single-GPU session).
+We rebuilt the **original `main`** (58-commit fork + old vllm base 5d64fd8db = PR #29439,
+the paper-time validated code) from source and ran the same §4.2 on this H200:
 
-## §3 Hazard rate (CFR vs IFR) — ✅ theoretical figure reproduced
+| scenario | old-main EB-vs-best-k | port EB-vs-best-k | paper | old-main eb | port eb | paper eb |
+|---|---:|---:|---:|---:|---:|---:|
+| decode_heavy | −2.2% | +0.1% | +8.0% | 11,941 | 13,385 | 15,725 |
+| balanced | −3.0% | −1.6% | +3.6% | 18,220 | 20,290 | 20,937 |
+| prefill_heavy | −7.7% | −0.4% | +0.6% | 30,115 | 34,019 | 32,863 |
 
-`plot_cfr_ifr.py --mean 512 --gamma-shape 4.0` → `CFR_IFR.pdf` (self-contained).
-Empirical-hazard variants need the real-workload datasets (see below).
-
-## Not yet run this session (need long GPU time and/or dataset downloads)
-
-These are harness-ready but each is a multi-hour serving sweep and several use
-older vLLM benchmark APIs that need the same kind of per-script drift fix found
-above:
-- §4.3.1 synthetic e2e grid (v0/v1/EB across 3 regimes)
-- §4.3.2/3 real workloads — ShareGPT / LongBench / WildChat / Numina (≈6–10 h)
-- §4.4 EB⁺ traffic (Table 4) + non-stationary (Table 5)
-
-## Bottom line
-
-The ported EB/EB⁺ scheduler runs correctly on latest upstream vLLM (4 runtime
-bugs from the port were found and fixed via these experiments), and the §4.2
-validation reproduces qualitatively (EB ≥ best-k, EB > v1). Exact paper
-magnitudes differ, most plausibly due to the large upstream-vLLM version gap
-vs the paper-time build; this needs deeper apples-to-apples investigation.
+The original code **also fails to reproduce the +8% margin on this box** (it is in fact worse
+than the port, with lower absolute throughput). Therefore the missing §4.2 margin is an
+**environment / measurement-setup difference** between this H200 machine and the paper authors'
+H200 setup — **not** a regression from the upstream port. The port is healthy and lands closer
+to the paper's absolute numbers than the original code does here.
