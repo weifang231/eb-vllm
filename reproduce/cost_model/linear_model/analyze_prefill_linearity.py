@@ -44,7 +44,7 @@ ranges = [
 ]
 
 print("=" * 80)
-print("PREFILL LINEARITY ANALYSIS — Qwen3-4B, RTX PRO 6000")
+print("PREFILL LINEARITY ANALYSIS")
 print("=" * 80)
 
 # Raw data table

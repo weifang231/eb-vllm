@@ -93,7 +93,7 @@ run_bench() {
 
     # Build env prefix.
     # eb        = EB(k̂*), ebplus = EB⁺. Both use the IFR adaptive
-    # controller (camera-ready paper) with online (k̂*, N̂*) tracking.
+    # controller (the paper) with online (k̂*, N̂*) tracking.
     local env_prefix="CUDA_VISIBLE_DEVICES=${GPU_ID}"
     case "$scheduler" in
         eb)

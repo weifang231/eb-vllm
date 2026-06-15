@@ -14,14 +14,14 @@ INPUT_LEN=131071
 # Model configs: name, model_path, gpu_id, max_concurrency, max_model_len, port, calibration_source
 declare -a JOBS=(
     # Qwen3 models (need YaRN local config)
-    "Qwen3-4B|${CONFIGS_DIR}/Qwen-Qwen3-4B|1|4|163840|13101|Qwen3-4B"
-    "Qwen3-8B|${CONFIGS_DIR}/Qwen-Qwen3-8B|2|3|163840|13102|Qwen3-8B"
-    "Qwen3-14B|${CONFIGS_DIR}/Qwen-Qwen3-14B|3|3|163840|13103|Qwen3-14B"
-    "Qwen3-30B-A3B|${CONFIGS_DIR}/Qwen-Qwen3-30B-A3B|4|4|163840|13104|Qwen3-30B-A3B"
+    "Qwen3-4B|${CONFIGS_DIR}/Qwen-Qwen3-4B|0|4|163840|13101|Qwen3-4B"
+    "Qwen3-8B|${CONFIGS_DIR}/Qwen-Qwen3-8B|1|3|163840|13102|Qwen3-8B"
+    "Qwen3-14B|${CONFIGS_DIR}/Qwen-Qwen3-14B|2|3|163840|13103|Qwen3-14B"
+    "Qwen3-30B-A3B|${CONFIGS_DIR}/Qwen-Qwen3-30B-A3B|3|4|163840|13104|Qwen3-30B-A3B"
     # Native 128K models
-    "Llama-3.2-1B|meta-llama/Llama-3.2-1B-Instruct|5|4|131072|13105|Llama-3.2-1B-Instruct"
-    "Llama-3.1-8B|meta-llama/Llama-3.1-8B-Instruct|6|3|131072|13106|Llama-3.1-8B-Instruct"
-    "Mistral-Nemo-12B|mistralai/Mistral-Nemo-Instruct-2407|7|3|131072|13107|Mistral-Nemo-Instruct-2407"
+    "Llama-3.2-1B|meta-llama/Llama-3.2-1B-Instruct|4|4|131072|13105|Llama-3.2-1B-Instruct"
+    "Llama-3.1-8B|meta-llama/Llama-3.1-8B-Instruct|5|3|131072|13106|Llama-3.1-8B-Instruct"
+    "Mistral-Nemo-12B|mistralai/Mistral-Nemo-Instruct-2407|6|3|131072|13107|Mistral-Nemo-Instruct-2407"
 )
 
 LOG_DIR="${SCRIPT_DIR}/../outputs/128k_all_models_$(date +%Y%m%d_%H%M%S)"

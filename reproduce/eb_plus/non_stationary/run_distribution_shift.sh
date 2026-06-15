@@ -42,7 +42,7 @@ PHASES=${PHASES:-"1024:128,512:512,128:1024"}
 OUTPUT_VARIANCE=${OUTPUT_VARIANCE:-0.5}
 SOURCE_DATASET=${SOURCE_DATASET:-"alpaca"}
 
-# Optimal configuration (H200)
+# Paper's optimal (B, N): TB=18432 BS=2048
 TB=${TB:-18432}
 BS=${BS:-2048}
 
@@ -185,7 +185,7 @@ run_single_experiment() {
             ;;
         ebplus)
             # EB⁺ = auto MB↔EB switch with IFR adaptive (k̂*, N̂*),
-            # matching the camera-ready paper Algorithm 1.
+            # matching the paper Algorithm 1.
             export VLLM_PD_SCHEDULER_MODE=auto
             export VLLM_PD_K_MODE=ifr
             export VLLM_PD_IFR_WINDOW_SIZE=$IFR_WINDOW_SIZE

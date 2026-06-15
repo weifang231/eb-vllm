@@ -150,7 +150,9 @@ class BatchBenchmark:
         """Add a new request to the engine."""
         assert self.engine_core is not None
 
-        req_id = f"req_{uuid.uuid4().hex[:8]}"
+        # Full uuid hex (not [:8]): a long sweep adds tens of thousands of
+        # requests, and 32-bit ids collide (birthday) -> "duplicate request id".
+        req_id = f"req_{uuid.uuid4().hex}"
         prompt_token_ids = list(np.random.randint(100, 10000, size=prompt_len))
 
         request = EngineCoreRequest(
@@ -159,7 +161,6 @@ class BatchBenchmark:
             mm_features=None,
             sampling_params=SamplingParams(max_tokens=max_tokens),
             pooling_params=None,
-            eos_token_id=None,
             arrival_time=time.time(),
             lora_request=None,
             cache_salt=None,
@@ -195,15 +196,25 @@ class BatchBenchmark:
 
         total_tokens = scheduler_output.total_num_scheduled_tokens
 
-        # Measure execute_model time
+        # Measure execute_model time. On current vLLM execute_model returns a
+        # future whose .result() is the ModelRunnerOutput (or None -> deferred
+        # sampling via sample_tokens); async scheduling wraps it in AsyncOutput,
+        # resolved via get_output().
         timer = GPUTimer()
         timer.start()
-        model_output = self.engine_core.model_executor.execute_model(
-            scheduler_output, non_block=False
+        future = self.engine_core.model_executor.execute_model(
+            scheduler_output, non_block=True
         )
-        # If execute_model returns None, we need to call sample_tokens
+        grammar_output = self.engine_core.scheduler.get_grammar_bitmask(
+            scheduler_output
+        )
+        model_output = future.result()
         if model_output is None:
-            model_output = self.engine_core.model_executor.sample_tokens(None)
+            model_output = self.engine_core.model_executor.sample_tokens(
+                grammar_output
+            )
+        if hasattr(model_output, "get_output"):
+            model_output = model_output.get_output()
         elapsed = timer.stop()
 
         # Update scheduler state (important!)

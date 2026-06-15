@@ -7,7 +7,7 @@
 #
 # The build has two stages:
 #   1. vllm-openai: full vLLM build from source (slow, ~30min first time)
-#   2. eb-vllm:icml2026: add reproduce/ scripts and deps (fast, ~1min)
+#   2. eb-vllm:repro: add reproduce/ scripts and deps (fast, ~1min)
 
 set -e
 
@@ -16,7 +16,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_ROOT"
 
 BASE_IMAGE="vllm-openai"
-EXP_IMAGE="eb-vllm:icml2026"
+EXP_IMAGE="eb-vllm:repro"
 EXP_ONLY=false
 
 for arg in "$@"; do

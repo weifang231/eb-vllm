@@ -1,9 +1,9 @@
 # Dockerfile for the eb-vllm reproduction harness.
 #
 # Build (from repo root):
-#   docker build -t eb-vllm:icml2026 -f reproduce/docker/Dockerfile .
+#   docker build -t eb-vllm:repro -f reproduce/docker/Dockerfile .
 #
-# Base image: vllm-openai built from this fork (release/icml2026), so the
+# Base image: vllm-openai built from this fork's release, so the
 # EB scheduler is already compiled in.
 
 ARG BASE_IMAGE=vllm-openai

@@ -383,7 +383,7 @@ def plot_results(input_json: str, output_dir: str, title: str | None = None, tot
 
     if title is None:
         model_name = _get_model_short_name(data.get("config", {}).get("model", ""))
-        title = f"{model_name} (NVIDIA RTX PRO 6000)" if model_name else "NVIDIA RTX PRO 6000"
+        title = model_name if model_name else "GPU"
 
     os.makedirs(output_dir, exist_ok=True)
 

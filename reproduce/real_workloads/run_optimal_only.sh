@@ -5,7 +5,7 @@
 # which sweeps a 5x6=30 (B, N) grid per scheduler.
 #
 # (B, N) values are taken from Appendix Table tab:optimal-config-h200 (H200,
-# Qwen3-8B) of the camera-ready paper.  Scheduler names match canonical
+# Qwen3-8B) of the paper.  Scheduler names match canonical
 # common_eb.sh nomenclature:
 #     v1         vLLM default mixed-batching (VLLM_USE_PD_SCHEDULER=0)
 #     eb         EB(k̂*) adaptive controller (K_MODE=ifr)

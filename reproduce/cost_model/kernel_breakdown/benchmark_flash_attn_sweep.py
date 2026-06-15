@@ -456,10 +456,10 @@ def main():
                        help="First GPU result JSON file (for --compare mode)")
     parser.add_argument("--json2", type=str, default=None,
                        help="Second GPU result JSON file (for --compare mode)")
-    parser.add_argument("--gpu1", type=str, default="H200",
-                       help="Name of first GPU (default: H200)")
-    parser.add_argument("--gpu2", type=str, default="RTX PRO 6000",
-                       help="Name of second GPU (default: A6000)")
+    parser.add_argument("--gpu1", type=str, default="GPU-1",
+                       help="Name/label of the first GPU")
+    parser.add_argument("--gpu2", type=str, default="GPU-2",
+                       help="Name/label of the second GPU")
     parser.add_argument("--compare-output", type=str, default="comparison.pdf",
                        help="Output path for comparison plot")
 

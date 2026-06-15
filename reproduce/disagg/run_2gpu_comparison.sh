@@ -99,7 +99,7 @@ run_dp2_bench() {
 
     # Set environment variables.
     # ebplus = EB⁺ (auto MB↔EB switch) with IFR adaptive (k̂*, N̂*),
-    # matching the camera-ready paper.
+    # matching the paper.
     local env_prefix="CUDA_VISIBLE_DEVICES=${GPU1},${GPU2}"
     case "$scheduler" in
         v1)

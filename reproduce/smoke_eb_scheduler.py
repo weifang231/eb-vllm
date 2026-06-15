@@ -5,21 +5,15 @@ Boots a tiny model under the EB scheduler and runs a batch of generations,
 exercising schedule_pd()'s prefill->decode phase machine. Used to validate the
 port of the EB scheduler onto upstream vLLM (does NOT check paper numbers).
 
-Run (single process; see NOTEs below):
+Run (single process):
 
-    CUDA_VISIBLE_DEVICES=6 VLLM_USE_FLASHINFER_SAMPLER=0 \
-        taskset -c 0-15 python reproduce/smoke_eb_scheduler.py
+    CUDA_VISIBLE_DEVICES=0 python reproduce/smoke_eb_scheduler.py
 
-NOTEs / environment gotchas discovered while bringing this up:
+NOTEs:
   * VLLM_USE_PD_SCHEDULER=1 (or VLLM_PD_SCHEDULER_MODE=eb/auto) selects the EB
     scheduler; VLLM_PD_K_MODE=ifr|cfr|ratio|direct picks the k* controller.
   * The EB scheduler requires hardware timing params; provide a calibration file
     via VLLM_PD_CALIBRATION_FILE, or set VLLM_PD_ALPHA_P/BETA_P/ALPHA_D/BETA_D.
-  * `taskset -c 0-15`: on big NUMA boxes (192 cores here) torch's worker CPU
-    affinity setup could hang in the kernel (sched_setaffinity); pinning to a
-    small core set avoids it. Not EB-specific.
-  * VLLM_USE_FLASHINFER_SAMPLER=0 avoids a runtime flashinfer JIT build (needs
-    `ninja` on PATH); also not EB-specific.
 """
 
 import os

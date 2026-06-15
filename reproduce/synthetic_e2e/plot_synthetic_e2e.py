@@ -122,7 +122,7 @@ def main() -> None:
         ax.legend(fontsize=9, loc="best")
 
     fig.suptitle(
-        f"§4.3.1 Synthetic workloads, H200 — best (B, N) per scheduler\n"
+        f"§4.3.1 Synthetic workloads — best (B, N) per scheduler\n"
         f"(source: {csv_path.parent.name})",
         fontsize=10,
     )

@@ -4,7 +4,7 @@
 #
 # Sweeps (token_budget, max_num_seqs) over the three synthetic workloads
 # (decode-heavy / balanced / prefill-heavy) and runs the v1 baseline (MB)
-# against EB(k̂*) using the IFR adaptive controller (camera-ready paper).
+# against EB(k̂*) using the IFR adaptive controller (paper).
 #
 # Usage:
 #   ./run_grid_search.sh [MAX_GPUS]

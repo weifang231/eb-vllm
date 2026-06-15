@@ -60,4 +60,4 @@ re-run resumes from the next missing cell).
   when no real CSV/JSON is supplied — useful for previewing figure shape
   before kicking off multi-hour experiments.
 - For an internal log of reproduction-blocker patches applied while
-  preparing the camera-ready snapshot, see `CHANGELOG.md` (gitignored).
+  preparing the snapshot, see `CHANGELOG.md` (gitignored).

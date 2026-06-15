@@ -105,7 +105,7 @@ run_dp4_bench() {
     done
 
     # ebplus = EB⁺ (auto MB↔EB switch) with IFR adaptive (k̂*, N̂*),
-    # matching the camera-ready paper.
+    # matching the paper.
     local env_prefix="CUDA_VISIBLE_DEVICES=${ALL_GPUS}"
     case "$scheduler" in
         ebplus)
